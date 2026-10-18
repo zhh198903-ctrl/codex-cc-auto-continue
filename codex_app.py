@@ -6,19 +6,23 @@ ChatGPT. Identify its executable path, not the title or an app-server process.
 from __future__ import annotations
 
 import ctypes
+import os
 from ctypes import wintypes
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import hashlib
-from pathlib import PureWindowsPath
+import json
+from pathlib import Path, PureWindowsPath
 import re
 import time
 from datetime import datetime, timezone
 
 import uiautomation as auto
 from codex_cli import Screen, _reset_time
+from codex_activity import RecentActivities, TAIL_BYTES
 
 _EMPTY = {'', '随心输入', 'Ask anything', 'Ask Codex anything',
-          'Ask Codex to do anything', 'Message Codex', 'Message ChatGPT'}
+          'Ask Codex to do anything', 'Message Codex', 'Message ChatGPT',
+          '描述你的任务以生成套餐…', '与 Codex 协作', '和 Codex 一起工作'}
 _STOP = {'停止', 'Stop', 'Stop generating', 'Stop response'}
 _EFFORT_LABELS = {'无': 'none', '最低': 'minimal', '轻度': 'low', '低': 'low',
                   '适中': 'medium', '中等': 'medium', '中': 'medium', '标准': 'medium',
@@ -56,6 +60,12 @@ def is_desktop_executable(path):
          and '\\node_modules\\' not in value))
 
 def terminal_handles():
+    if os.environ.get('CONTROL_TEST_RPC_ONLY') == '1':
+        return []
+    allowed = os.environ.get("CONTROL_TEST_HWND")
+    if allowed:
+        hwnd = int(allowed)
+        return [hwnd] if test_target_matches(hwnd) else []
     """Same driver protocol as the CLI; these handles belong only to the app."""
     handles = []
     user = ctypes.windll.user32
@@ -70,8 +80,29 @@ def terminal_handles():
         raise OSError('Codex desktop window enumeration failed')
     return handles
 
+def test_target_matches(hwnd):
+    if not window_exists(hwnd):
+        return False
+    allowed = os.environ.get('CONTROL_TEST_HWND')
+    if not allowed:
+        return True
+    pid = wintypes.DWORD()
+    ctypes.windll.user32.GetWindowThreadProcessId(wintypes.HWND(hwnd), ctypes.byref(pid))
+    return (str(hwnd) == allowed and str(pid.value) == os.environ.get('CONTROL_TEST_PID')
+            and executable(hwnd).casefold() == os.environ.get('CONTROL_TEST_EXE', '').casefold())
+
 def window_exists(hwnd):
     return bool(ctypes.windll.user32.IsWindow(wintypes.HWND(hwnd)))
+
+
+def process_identity(hwnd):
+    """Pin one native GUI independently of the logical conversation ID."""
+    if not window_exists(hwnd):
+        return None
+    pid = wintypes.DWORD()
+    ctypes.windll.user32.GetWindowThreadProcessId(wintypes.HWND(hwnd), ctypes.byref(pid))
+    path = executable(hwnd)
+    return (pid.value, path.casefold()) if pid.value and is_desktop_executable(path) else None
 
 @dataclass
 class Window:
@@ -81,18 +112,63 @@ class Window:
     Name: str = 'Codex App'
 
 def window_from_handle(hwnd):
-    if not window_exists(hwnd) or not is_desktop_executable(executable(hwnd)):
+    if not test_target_matches(hwnd) or not is_desktop_executable(executable(hwnd)):
         return None
     return Window(auto.ControlFromHandle(int(hwnd)), int(hwnd))
 
-def walk(control, depth=0, count=None):
+def walk(control, depth=0, count=None, compact_text=False):
     count = count if count is not None else [0]
     if depth > 60 or count[0] >= 12000:
         raise RuntimeError('Desktop accessibility tree exceeds inspection bounds')
     count[0] += 1
     yield control
-    for child in control.GetChildren():
-        yield from walk(child, depth + 1, count)
+    children = control.GetChildren()
+    # Native Markdown emits a separate TextControl for every streamed word.
+    # Its paragraph/list-item already exposes the complete text in Name.
+    # Control discovery does not need those redundant leaves; preserve every
+    # interactive or mixed child, and retain the normal bounds elsewhere.
+    if compact_text and children:
+        classes = getattr(control, 'ClassName', '').split()
+        rendered = any(token.startswith(('_ListItem_', '_Paragraph_')) for token in classes)
+        if rendered and all(c.ControlTypeName == 'TextControl' and not c.GetChildren() for c in children):
+            return
+    for child in children:
+        yield from walk(child, depth + 1, count, compact_text)
+
+
+def control_nodes(control):
+    """Bounded UIA controls without redundant native Markdown word leaves."""
+    return walk(control, compact_text=True)
+
+
+class _ReadControl:
+    """Reuse tree structure and discovery metadata within one read only.
+
+    UIA properties make cross-process calls. Control types, layout classes
+    and children are repeatedly inspected by the same traversal. Keep those
+    local to this observation; return original live controls in every View.
+    Values, visibility, enabled state, runtime IDs and patterns stay live.
+    """
+    def __init__(self, control):
+        self.control = control
+        self.metadata = {}
+        self.children = None
+
+    def __getattr__(self, name):
+        if name in {'ControlTypeName', 'ClassName'}:
+            if name not in self.metadata:
+                self.metadata[name] = getattr(self.control, name)
+            return self.metadata[name]
+        return getattr(self.control, name)
+
+    def GetChildren(self):
+        if self.children is None:
+            self.children = [_ReadControl(c) for c in self.control.GetChildren()]
+        return self.children
+
+
+def _live_control(control):
+    return control.control if isinstance(control, _ReadControl) else control
 
 @dataclass
 class View:
@@ -108,6 +184,10 @@ class View:
     permission_button: object = None
     permission_mode: str = ''
     approval_button: object = None
+    question_card: object = None
+    # Same-read UIA objects for immediate observation on the owning worker.
+    # Mutations still obtain a fresh View and validate its full identity.
+    controls: object = field(default=None, repr=False, compare=False)
 
 @dataclass
 class Submission:
@@ -116,11 +196,15 @@ class Submission:
     user_turn: str
     invoked_at: float | None = None
     thread_hint: str = ''
+    thread_id: str = ''
+    rollout_path: str = ''
+    rollout_offset: int = 0
 
 @dataclass
 class SendOutcome:
     status: str
     submission: Submission | None = None
+    detail: str = ''
 
     def __bool__(self):
         return self.status == 'sent'
@@ -172,7 +256,13 @@ def _native_error(nodes):
     for c in after:
         if c.ControlTypeName == 'EditControl' or c.Name in {'最新一条回复', 'Latest reply', 'Latest response'}:
             break
-        if c.ControlTypeName == 'TextControl' and c.Name.strip() and c.Name not in {'正在思考', 'Thinking'}:
+        # The native stop summary is a normal cancelled turn, not a failed
+        # authentication/request. It must not hold the next explicit send.
+        # Unknown native text and actual errors still require attention.
+        stopped = c.ControlTypeName == 'TextControl' and re.fullmatch(
+            r'你在\s*\d+(?:\.\d+)?秒\s*后停止了|You stopped after \d+(?:\.\d+)? (?:second|minute)s?\.?',
+            c.Name or '')
+        if c.ControlTypeName == 'TextControl' and c.Name.strip() and not stopped and c.Name not in {'正在思考', 'Thinking'}:
             candidates.append(c.Name)
         if c.ControlTypeName == 'TextControl' and re.match(
             r"^(?:你已达到使用上限|You've (?:hit|reached) your usage limit|You have reached|"
@@ -194,10 +284,31 @@ def _permission_card(nodes):
             continue
         names = {c.Name for c in actions.GetChildren() if c.ControlTypeName == 'ButtonControl' and not c.IsOffscreen}
         card = actions.GetParentControl()
-        if names == {'拒绝', '允许一次', '审批选项'} and any(c.ControlTypeName == 'TextControl' and c.Name == '权限'
+        if names == {'拒绝', '允许一次', '审批选项'} and any(c.ControlTypeName == 'TextControl' and c.Name in {'权限', 'Permission', '终端', 'Terminal'}
                                                      for c in walk(card)):
             approvals.append(button)
     return approvals[0] if len(approvals) == 1 else None
+
+
+def _question_cards(nodes):
+    """Recognize the captured native request_user_input card, never prose."""
+    if any(c.ControlTypeName in {'MenuControl', 'WindowControl'} and not c.IsOffscreen for c in nodes):
+        return []
+    cards = []
+    for control in nodes:
+        if '@container/request-card' not in getattr(control, 'ClassName', '').split() or control.IsOffscreen:
+            continue
+        inside = list(walk(control))
+        choices = [c for c in inside if c.ControlTypeName == 'RadioButtonControl' and c.Name and c.IsEnabled and not c.IsOffscreen]
+        entries = [c for c in inside if c.ControlTypeName == 'EditControl' and c.IsEnabled and not c.IsOffscreen and not getattr(c, 'IsPassword', False)]
+        if (choices or len(entries) == 1) and len(entries) <= 1 and any(c.ControlTypeName == 'TextControl' and c.Name for c in inside):
+            cards.append(control)
+    return cards
+
+
+def _question_card(nodes):
+    cards = _question_cards(nodes)
+    return cards[0] if len(cards) == 1 else None
 
 
 def _native_user_text(nodes, index):
@@ -229,10 +340,16 @@ def _conversation_hint(nodes, users):
 def read_text(window):
     """Read actual UIA controls, keeping conversation prose out of identity."""
     try:
+        if getattr(window.control, 'NativeWindowHandle', None) == window.hwnd:
+            user = ctypes.windll.user32
+            handle = wintypes.HWND(window.hwnd)
+            if user.IsIconic(handle) or not user.IsWindowVisible(handle):
+                return None
         document = window.control.DocumentControl(searchDepth=18, AutomationId='RootWebArea')
         if not document.Exists(0, 0):
             return None
-        nodes = list(walk(document))
+        nodes = list(control_nodes(_ReadControl(document)))
+        live_nodes = [_live_control(c) for c in nodes]
         modes = [match.group(1).strip().casefold() for c in nodes
                  if c.ControlTypeName == 'ButtonControl' and not c.IsOffscreen
                  and (match := re.search(r'(?:当前模式[：:]|current mode:\s*)\s*([^,，]+)', c.Name or '', re.I))]
@@ -244,20 +361,32 @@ def read_text(window):
         # Codex's composer is the last editable control in the document;
         # modal input/search fields must not be mistaken for it.
         composers = [c for c in edits if c.Name in _EMPTY - {''}]
+        questions = _question_cards(nodes) if mode and thread_hint else []
+        question = questions[0] if len(questions) == 1 else None
         if len(composers) != 1:
             approval = _permission_card(nodes) if mode and thread_hint else None
             if approval is not None:
                 identity = hashlib.sha256(repr((document.Name, thread_hint)).encode()).hexdigest()
                 return View(identity, document.Name or 'Codex App',
                             Screen(identified=True, blocked=True, permission=True),
-                            thread_hint=thread_hint, approval_button=approval)
-            return View('', document.Name or 'Codex App', Screen(identified=mode, blocked=True))
+                            thread_hint=thread_hint, approval_button=_live_control(approval), controls=live_nodes)
+            if question is not None:
+                identity = hashlib.sha256(repr((document.Name, thread_hint)).encode()).hexdigest()
+                return View(identity, document.Name or 'Codex App', Screen(identified=True, blocked=True),
+                            thread_hint=thread_hint, question_card=_live_control(question), controls=live_nodes)
+            return View('', document.Name or 'Codex App', Screen(identified=mode, blocked=True), controls=live_nodes)
         composer = composers[0]
         scope = composer.GetParentControl()
         for _ in range(2):
             scope = scope.GetParentControl()
-        controls = list(walk(scope))
+        controls = list(control_nodes(scope))
         buttons = [c for c in controls if c.ControlTypeName == 'ButtonControl' and not c.IsOffscreen]
+        # Current native layouts expose Send/Stop outside the composer's old
+        # ancestor chain. Their native size class distinguishes them from
+        # sidebar buttons and assistant prose in the same document.
+        native_actions = [c for c in nodes if c.ControlTypeName == 'ButtonControl' and not c.IsOffscreen
+                          and 'size-token-button-composer' in getattr(c, 'ClassName', '').split()
+                          and c.Name in _STOP | {'发送', '发送消息', 'Send', 'Send message', 'Submit'}]
         # Native chat action/composer runtime IDs change when the active
         # conversation changes. Pending recovery never crosses that boundary.
         # Permission cards temporarily unmount the composer. The native chat
@@ -272,8 +401,9 @@ def read_text(window):
             else:
                 return None
         draft = (value or '').strip() not in _EMPTY
-        busy = any(c.Name in _STOP for c in buttons)
-        send = next((c for c in buttons if c.Name in {'发送', '发送消息', 'Send', 'Send message', 'Submit'}), None)
+        busy = any(c.Name in _STOP for c in native_actions or buttons)
+        sends = [c for c in native_actions or buttons if c.Name in {'发送', '发送消息', 'Send', 'Send message', 'Submit'}]
+        send = sends[0] if len(sends) == 1 else None
         model = next((c for c in buttons if re.match(r'(?:GPT|gpt|o\d|Codex|自定义|Custom|5\.5|[5-9](?:\.\d+)?\s+(?:Sol|Astra|Luna|Terra))\b', c.Name or '')
                       or (c.Name or '').startswith('自定义 ')), None)
         permission_button = next((c for c in buttons if c.Name == '更改权限'), None)
@@ -309,7 +439,7 @@ def read_text(window):
                 kind = 'attention'
             else:
                 kind = 'network'
-        blocked = any(not c.IsOffscreen and (c.ControlTypeName in {'MenuControl', 'WindowControl'} or
+        blocked = bool(questions) or any(not c.IsOffscreen and (c.ControlTypeName in {'MenuControl', 'WindowControl'} or
                       c.Name in {'确认', 'Permission request', '需要批准', 'Approval required'}) for c in nodes)
         # The shared desktop shell can also show ChatGPT / Work. Only its
         # visible mode control can identify a Codex session; hidden controls
@@ -352,8 +482,8 @@ def read_text(window):
                 user_text = '\n'.join(body).strip()
                 user_turn = hashlib.sha256(repr((tuple(header.GetRuntimeId()), user_text)).encode()).hexdigest()
         # Keep the same conversation hint when React redraws message nodes.
-        return View(identity, title, screen, composer, send, model, user_turn, user_text, thread_hint,
-                    permission_button, permission_mode)
+        return View(identity, title, screen, _live_control(composer), _live_control(send), _live_control(model), user_turn, user_text, thread_hint,
+                    _live_control(permission_button), permission_mode, question_card=_live_control(question), controls=live_nodes)
     except Exception:
         return None
 
@@ -368,48 +498,80 @@ def prepare(window, identity):
 
 def _ready(window):
     view = read_text(window)
-    if view is None or not view.identity or (window.expected_identity and view.identity != window.expected_identity):
+    window.ready_hold_reason = ''
+    if view is None or not view.identity:
+        window.ready_hold_reason = 'unreadable' if view is None else 'redraw'
+        return None
+    if window.expected_identity and view.identity != window.expected_identity:
+        window.ready_hold_reason = 'changed_identity'
         return None
     if not _hint_matches(window, view):
+        window.ready_hold_reason = 'changed_thread'
         return None
     screen = view.screen
-    return view if screen.ready and not (screen.running or screen.draft or screen.blocked) else None
+    if not screen.ready or screen.running or screen.draft or screen.blocked:
+        window.ready_hold_reason = ('running' if screen.running else 'draft' if screen.draft
+                                    else 'blocked' if screen.blocked else 'not_ready')
+        return None
+    return view
 
 def _hint_matches(window, view):
     expected = getattr(window, 'expected_thread_hint', '')
     return not expected or (view is not None and view.thread_hint == expected)
 
+def _ready_stable(window, identity=''):
+    # DOM focus can briefly unmount ProseMirror. Wait only by reading, before
+    # any draft is staged. A known changed identity, draft, running turn or
+    # blocked view fails immediately; no focus or write action is repeated.
+    current = _ready(window)
+    # UIA can spend the whole budget reading a large chat before returning a
+    # stale snapshot. Start the recovery interval after that first read so a
+    # focus redraw always gets one fresh observation before any write.
+    deadline = time.monotonic() + 1
+    while (current is None and window.ready_hold_reason in {'unreadable', 'redraw'}
+           and time.monotonic() < deadline):
+        time.sleep(.05)
+        current = _ready(window)
+    if current is not None and identity and current.identity != identity:
+        window.ready_hold_reason = 'changed_identity'
+        return None
+    return current
+
 def send_prompt(window, prompt, dry_run=False):
     if not prompt.strip() or '\n' in prompt or '\r' in prompt:
-        return SendOutcome('held')
-    view = _ready(window)
+        return SendOutcome('held', detail='invalid_text')
+    view = _ready_stable(window, window.expected_identity)
     if view is None:
-        return SendOutcome('held')
+        return SendOutcome('held', detail='preflight_' + window.ready_hold_reason)
     if dry_run:
         return SendOutcome('sent')
+    identity = view.identity
+    submission = None
     user = ctypes.windll.user32
     user.GetForegroundWindow.restype = wintypes.HWND
     previous = user.GetForegroundWindow()
-    identity = view.identity
-    submission = None
     try:
-        window.control.SetActive()
+        # ProseMirror requires its own editor to have DOM focus for ValuePattern
+        # writes to become input events. Focus only this verified control; no
+        # window activation, clipboard, coordinate input or keystrokes.
         view.composer.SetFocus()
-        time.sleep(.2)
-        current = _ready(window)
-        if current is None or current.identity != identity or user.GetForegroundWindow() != window.hwnd:
-            return SendOutcome('held')
+        time.sleep(.05)
+        current = _ready_stable(window, identity)
+        if current is None or current.identity != identity:
+            return SendOutcome('held', detail='focused_' + (window.ready_hold_reason or 'changed_identity'))
         # ValuePattern updates the contenteditable without typing over a
         # user's draft; the empty value was verified immediately above.
         pattern = current.composer.GetValuePattern()
         if not pattern:
-            return SendOutcome('held')
+            return SendOutcome('held', detail='no_value_pattern')
         submission = Submission(identity, prompt, current.user_turn, thread_hint=current.thread_hint)
+        _capture_rollout(window, submission)
         pattern.SetValue(prompt)
         time.sleep(.2)
         return poll_submission(window, submission)
-    except Exception:
-        return SendOutcome('waiting_send', submission) if submission else SendOutcome('held')
+    except Exception as error:
+        return (SendOutcome('waiting_send', submission, detail='staged_' + type(error).__name__)
+                if submission else SendOutcome('held', detail='preparation_' + type(error).__name__))
     finally:
         if previous and previous != window.hwnd and user.GetForegroundWindow() == window.hwnd:
             user.SetForegroundWindow(wintypes.HWND(previous))
@@ -419,12 +581,81 @@ def _draft(view):
     return pattern.Value if pattern else None
 
 def _submitted(view, submission):
+    if (view is None or view.identity != submission.identity or
+            (submission.thread_hint and view.thread_hint != submission.thread_hint)):
+        return False
+    if submission.invoked_at is not None and _rollout_submitted(submission):
+        return True
     value = _draft(view) if view is not None else None
     return (view is not None and view.identity == submission.identity and
             (not submission.thread_hint or view.thread_hint == submission.thread_hint) and
             bool(view.user_turn) and view.user_turn != submission.user_turn and
             view.user_text.strip() == submission.prompt.strip() and
             value is not None and value.strip() in _EMPTY)
+
+
+def _capture_rollout(window, submission):
+    """Capture a read-only cursor for this already bound full desktop thread."""
+    tid = getattr(window, 'expected_thread_id', '')
+    try:
+        record = RecentActivities().thread(tid) if tid else None
+        if not record:
+            return
+        path = Path(record['rollout_path'])
+        with path.open('rb') as stream:
+            header = json.loads(stream.readline(TAIL_BYTES))
+            if header.get('type') != 'session_meta' or header.get('payload', {}).get('id') != tid:
+                return
+            stream.seek(0, 2)
+            submission.rollout_offset = stream.tell()
+        submission.thread_id, submission.rollout_path = tid, str(path.resolve())
+    except (OSError, ValueError, KeyError):
+        pass
+
+
+def _rollout_submitted(submission):
+    # Background Electron accessibility may retain an older user bubble. A
+    # newly appended user message in the exact bound thread is authoritative;
+    # historical matching text, another thread, or a different new user cannot
+    # confirm this receipt. This function never drives or writes to Codex.
+    if not submission.thread_id or not submission.rollout_path:
+        return False
+    try:
+        record = RecentActivities().thread(submission.thread_id)
+        path = Path(submission.rollout_path)
+        if not record or Path(record['rollout_path']).resolve() != path.resolve():
+            return False
+        with path.open('rb') as stream:
+            header = json.loads(stream.readline(TAIL_BYTES))
+            if header.get('type') != 'session_meta' or header.get('payload', {}).get('id') != submission.thread_id:
+                return False
+            stream.seek(0, 2)
+            if stream.tell() < submission.rollout_offset:
+                return False
+            stream.seek(submission.rollout_offset)
+            lines = stream.read(TAIL_BYTES).splitlines(keepends=True)
+        for line in lines:
+            if not line.endswith(b'\n'):
+                continue
+            item = json.loads(line)
+            payload = item.get('payload', {})
+            if item.get('type') == 'response_item' and payload.get('type') == 'message' and payload.get('role') == 'user':
+                metadata = payload.get('internal_chat_message_metadata_passthrough')
+                if (isinstance(metadata, dict) and
+                        metadata.get('content_item_kinds') in (
+                            ['environments.environment_context'],
+                            ['additional_content.codex_apps_open_page'])):
+                    # Native permission changes and the visible Page snapshot
+                    # inject host context before actual user input. Skip only
+                    # these observed singleton kinds; mixed/user/unknown kinds
+                    # still fence the receipt. Context alone never confirms it.
+                    continue
+                text = '\n'.join(c.get('text', '') for c in payload.get('content', [])
+                                 if c.get('type') in {'input_text', 'text'})
+                return text.strip() == submission.prompt.strip()
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    return False
 
 
 def _send_available(button):
@@ -458,26 +689,30 @@ def poll_submission(window, submission, retry_seconds=30, allow_click=True):
         if (view.identity != submission.identity or not _hint_matches(window, view) or
                 (submission.thread_hint and view.thread_hint != submission.thread_hint) or
                 (window.expected_identity and view.identity != window.expected_identity)):
-            return SendOutcome('held')
+            return SendOutcome('unknown' if submission.invoked_at is not None else 'held')
         if _submitted(view, submission):
             return SendOutcome('sent')
+        if submission.invoked_at is not None:
+            # Native Send is irreversible. A stale/cleared editor is never
+            # permission to invoke it again or report a retryable failure.
+            status = 'confirming_send' if time.monotonic() - submission.invoked_at < 10 else 'unknown'
+            return SendOutcome(status, submission)
         value = _draft(view)
         if value is None:
             return SendOutcome('waiting_send', submission)
         if value.strip() != submission.prompt.strip():
             # Clearing/editing our draft revokes it. A cleared composer alone
             # is not evidence of submission.
-            if submission.invoked_at is not None and value.strip() in _EMPTY and time.monotonic() - submission.invoked_at < 5:
-                return SendOutcome('confirming_send', submission)
             return SendOutcome('held')
         if (not allow_click or not view.screen.ready or view.screen.running or view.screen.blocked or
                 view.screen.error_kind == 'attention' or not _send_available(view.send)):
             return SendOutcome('waiting_send', submission)
         if submission.invoked_at is not None and time.monotonic() - submission.invoked_at < retry_seconds:
             return SendOutcome('confirming_send', submission)
-        window.control.SetActive()
+        # DOM focus stays tied to the exact editor. Re-read the binding and
+        # owned draft before invoking; never type into the foreground app.
         view.composer.SetFocus()
-        time.sleep(.1)
+        time.sleep(.05)
         view = read_text(window)
         if view is None or not view.identity:
             return SendOutcome('waiting_send', submission)
@@ -491,7 +726,7 @@ def poll_submission(window, submission, retry_seconds=30, allow_click=True):
             return SendOutcome('waiting_send', submission)
         if value.strip() != submission.prompt.strip():
             return SendOutcome('held')
-        if (user.GetForegroundWindow() != window.hwnd or not view.screen.ready or
+        if (not view.screen.ready or
                 view.screen.running or view.screen.blocked or view.screen.error_kind == 'attention' or
                 not _send_available(view.send)):
             return SendOutcome('waiting_send', submission)
@@ -514,18 +749,23 @@ def poll_submission(window, submission, retry_seconds=30, allow_click=True):
 def _model_key(value):
     return re.sub(r'[^a-z0-9]', '', re.sub(r'^gpt[ -]?', '', value.casefold()))
 
-def _act(control):
+def _act(control, patterns_only=True):
     if not control.IsEnabled or control.IsOffscreen:
         return False
     invoke = getattr(control, 'GetInvokePattern', lambda: None)()
     expand = getattr(control, 'GetExpandCollapsePattern', lambda: None)()
     select = getattr(control, 'GetSelectionItemPattern', lambda: None)()
+    toggle = getattr(control, 'GetTogglePattern', lambda: None)()
     if invoke:
         invoke.Invoke()
     elif expand:
         expand.Expand()
     elif select:
         select.Select()
+    elif toggle:
+        toggle.Toggle()
+    elif patterns_only:
+        return False
     else:
         control.Click()
     time.sleep(.15)

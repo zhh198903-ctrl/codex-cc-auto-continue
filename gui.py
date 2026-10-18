@@ -22,11 +22,12 @@ buffer seconds, dry-run flag, excluded window titles.
 
 from __future__ import annotations
 
+import collections
 import html
 import os
-import queue
 import re as _re
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -90,10 +91,12 @@ from auto_continue import (
     parse_limit_prompt, parse_oauth_expired, parse_retry_exhausted,
     parse_server_error_stuck, parse_switch_model_prompt, read_terminal_text,
     send_continue, send_keys, send_text_lines, session_running,
-    summarize_keyspec,
+    summarize_keyspec, terminal_window_from_handle, keyspec_problem,
+    typing_hold_reason,
 )
 import updater
 import local_api
+from pathlib import Path
 from cli_routing import claude_windows as find_terminal_windows
 from cli_routing import claude_window as terminal_window_from_handle
 from codex_gui import ACTIVITY_LABELS, CodexGuiMixin
@@ -460,6 +463,24 @@ FABLE_VERDICT_MAX_S = 600
 # wasted for long. The prompt re-arms only after the session is seen
 # RUNNING again, so it fires once per completed run — not once per tick.
 AFTER_FINISH_SETTLE_S = 90
+
+# Claude Code's own "you are scrolled up" hint, drawn just above the prompt
+# rule while the view is away from the live bottom. Only the last rows are
+# searched, so the phrase quoted in a conversation further up does not count.
+SCROLLED_AWAY_RE = _re.compile(r"Jump\s+to\s+bottom\b")
+SCROLLED_AWAY_TAIL = 1500
+
+# How long to wait before re-listing windows when a known, still-open one
+# went missing from a pass (see Watcher._enumerate_settled). Two seconds is
+# what the external coverage monitor settled on: long enough for the hiccup to
+# pass, short enough not to hold the watcher thread noticeably.
+_ENUM_RETRY_WAIT_S = 2.0
+
+# A window scrolled away from its live bottom is skipped (it cannot be read),
+# so left scrolled it would be skipped for good. After this long it is sent
+# Claude Code's own "jump to bottom" key and is watched again. 0 = never.
+DEFAULT_SCROLL_BACK_MIN = 60
+SCROLL_TO_BOTTOM_KEYS = "{Ctrl}{End}"
 # A handled notice drifts further from the tail as the session prints, so a
 # match much CLOSER than the furthest we've seen is a genuinely new block.
 #
@@ -703,6 +724,83 @@ def _hwnd_alive(hwnd: int) -> bool:
         return True
 
 
+def _prompt_ident(p):
+    """Which prompt this is, for seen_at: kind plus its sig (or its text)."""
+    if not p:
+        return None
+    return (p.get("kind"), p.get("sig") or p.get("text"))
+
+
+def _api_row(row: dict) -> dict:
+    """A window row as the local API sends it: every datetime as ISO text.
+
+    Any datetime, not a list of known keys: a list is what let the rescan
+    reply go out with raw datetimes in it, and what a new field would
+    silently fall out of next time.
+    """
+    return {k: (v.isoformat() if hasattr(v, "isoformat") else v)
+            for k, v in dict(row).items()}
+
+
+def _discovery_exe():
+    """This copy's exe path for the discovery file, or None from source."""
+    return updater.current_exe_path() if updater.is_frozen() else None
+
+
+class _ApiTicket:
+    """One external action on its way to the watcher thread.
+
+    It lives through queued -> started -> done, or queued -> cancelled, and
+    the step between those two is taken under a lock, so exactly one side
+    wins it. That is what lets the HTTP side promise that "busy" means
+    nothing was done: it answers busy only after it has cancelled a ticket
+    that had not started, and the watcher drops a cancelled ticket unrun.
+
+    Before this, the request timed out into "busy" while the signal it had
+    already emitted stayed queued, and the watcher typed the text anyway
+    once the pass ended (2026-09-27, found by a companion's test window).
+    The caller retried, as busy invites, so the text went in twice, and the
+    second Enter landed on a permission prompt the first send had raised,
+    approving it.
+
+    `put` keeps the queue.Queue spelling the api_* slots already use.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._done = threading.Event()
+        self.state = "queued"
+        self.result = None
+
+    def start(self) -> bool:
+        with self._lock:
+            if self.state != "queued":
+                return False
+            self.state = "started"
+            return True
+
+    def cancel(self) -> bool:
+        with self._lock:
+            if self.state != "queued":
+                return False
+            self.state = "cancelled"
+            return True
+
+    def put(self, result) -> None:
+        with self._lock:
+            if self._done.is_set():
+                return              # first answer wins
+            self.result = result
+            self.state = "done"
+            self._done.set()
+
+    def done(self) -> bool:
+        return self._done.is_set()
+
+    def wait(self, timeout: float) -> bool:
+        return self._done.wait(timeout)
+
+
 @dataclass
 class _WState:
     """Internal per-window state, kept inside the watcher thread only."""
@@ -742,9 +840,13 @@ class _WState:
     # known answer standing instead of reporting 'not waiting'.
     prompt: Optional[dict] = None
     prompt_at: Optional[datetime] = None
+    # When this window's screen was last read, by a pass or a rescan.
+    read_at: Optional[datetime] = None
     # Interactive limit-picker ("What do you want to do?") bookkeeping.
     prompt_last_sent_utc: Optional[datetime] = None
     prompt_active: bool = False
+    # One line per hold (see typing_hold_reason), not one per pass.
+    hold_logged: bool = False
     # OAuth-expired warn-once flag ('continue' can't fix that state).
     oauth_logged: bool = False
     # Multi-tab bookkeeping: background tabs can't be watched (WT exposes
@@ -793,6 +895,8 @@ class _WState:
     fable_our_models: set = field(default_factory=set)  # models we typed
     fable_scope_key: Optional[str] = None         # key we matched scope on
     scope_warned: bool = False                    # 'not in scope' said once
+    scrolled_away: bool = False                   # view not at the live bottom
+    scrolled_since: Optional[datetime] = None     # when it was first seen so
 
 
 class Watcher(QObject):
@@ -821,7 +925,13 @@ class Watcher(QObject):
 
     def __init__(self):
         super().__init__()
-        self._in_tick = False
+        # External actions waiting for this thread: (job, _ApiTicket).
+        # Drained between passes (woken by a signal) and between windows
+        # inside one, so a caller waits for one window, not a whole pass.
+        self._api_pending: collections.deque = collections.deque()
+        self._api_draining = False
+        # The rows last published (see _publish_snapshot); None until then.
+        self.latest_rows: Optional[list] = None
         self._states: dict[int, _WState] = {}
         # Handles the OS still reports as open that a pass did not
         # enumerate; kept so the warning fires on change, not every tick.
@@ -883,6 +993,7 @@ class Watcher(QObject):
         # autonomy, so it ships OFF and is theirs to turn on.
         self._auto_choose = False
         self._auto_permission = True
+        self._scroll_back_s = DEFAULT_SCROLL_BACK_MIN * 60
 
         # User overrides for the detection regexes (Advanced → Triggers).
         # Only keys the user actually changed (and that validated) live here;
@@ -931,6 +1042,13 @@ class Watcher(QObject):
     @pyqtSlot(int)
     def set_retry_interval(self, seconds: int) -> None:
         self._retry_interval = max(5, int(seconds))
+
+    @pyqtSlot(int)
+    def set_scroll_back(self, minutes: int) -> None:
+        try:
+            self._scroll_back_s = max(0, int(minutes)) * 60
+        except (TypeError, ValueError):
+            self._scroll_back_s = DEFAULT_SCROLL_BACK_MIN * 60
 
     @pyqtSlot(bool)
     def set_dry_run(self, on: bool) -> None:
@@ -1243,16 +1361,41 @@ class Watcher(QObject):
         self._retick_at = None
         self._tick_safely()
 
-    def _tick(self) -> None:
-        # Read by the local API from its own thread so it can answer
-        # "busy" immediately. Qt would queue an external send behind the
-        # whole pass anyway, and a caller wanting an answer now would
-        # otherwise sit through a full UIA sweep before hearing one.
-        self._in_tick = True
+    def _enumerate_settled(self) -> list:
+        """The window list, taken again once if it dropped windows that exist.
+
+        UI Automation sometimes hands back a short or empty list for a moment
+        while every window is still open — several times a day on the
+        maintainer's machine by 2026-09-25, often all four at once. The state
+        survived (the ghost handling below keeps it), but the pass was lost:
+        nothing on those windows was read or acted on for a whole interval.
+        A second look a couple of seconds later is almost always complete, so
+        take it — but only when a window we know about is missing AND Windows
+        confirms it is still open; a window that was really closed is not a
+        hiccup and costs no wait.
+        """
+        windows = find_terminal_windows()
         try:
-            self._tick_body()
-        finally:
-            self._in_tick = False
+            got = {int(w.NativeWindowHandle or 0) for w in windows}
+        except Exception:
+            return windows
+        missing = [h for h in self._states
+                   if h not in got and _hwnd_alive(h)]
+        if not missing:
+            return windows
+        time.sleep(_ENUM_RETRY_WAIT_S)
+        again = find_terminal_windows()
+        try:
+            got2 = {int(w.NativeWindowHandle or 0) for w in again}
+        except Exception:
+            return windows
+        # Keep whichever look saw more of the windows we are waiting for.
+        if sum(h in got2 for h in missing) > 0 and len(got2) >= len(got):
+            return again
+        return windows
+
+    def _tick(self) -> None:
+        self._tick_body()
 
     def _tick_body(self) -> None:
         now = datetime.now(pytz.UTC)
@@ -1260,10 +1403,16 @@ class Watcher(QObject):
         buffer = timedelta(seconds=self._buffer)
         retry_interval = timedelta(seconds=self._retry_interval)
 
-        windows = find_terminal_windows()
+        windows = self._enumerate_settled()
         seen: set[int] = set()
 
         for w in windows:
+            # A caller's action waits for the window in hand, not the pass:
+            # six windows took 20-40 s to sweep, and a keystroke held that
+            # long timed out at the caller (2026-09-27). Between two windows
+            # this thread is not typing anything of its own, so an external
+            # send cannot interleave with one.
+            self.api_drain()
             # Every window is processed inside its own guard. Without it a
             # throw here abandoned the whole loop, so every window after
             # this one went unwatched for the pass — the Fable block below
@@ -1375,6 +1524,53 @@ class Watcher(QObject):
                 # Only a readable pass can say anything about this; an
                 # unreadable one leaves the previous answer standing rather
                 # than reporting a streaming turn as finished.
+                # Scrolled up inside Claude Code: newer builds draw their own
+                # screen, and while the user is reading back through it the
+                # live bottom — spinner, prompt box, any dialog — is simply not
+                # on screen; a "Jump to bottom" hint sits where they were.
+                # Captured 2026-09-25 on a session hard at work: the rows on
+                # show held an OLD error and nothing after it, so it read as
+                # stuck and would have had 'continue' typed into a turn in
+                # flight. What cannot be seen cannot be decided on — skip the
+                # window this pass, keep everything known about it, and say so
+                # once. It is picked up again the moment the view returns.
+                if tail and SCROLLED_AWAY_RE.search(tail[-SCROLLED_AWAY_TAIL:]):
+                    if not st.scrolled_away:
+                        st.scrolled_away = True
+                        st.scrolled_since = now
+                        self.log.emit(
+                            "info",
+                            f"{_wt} is scrolled up (Claude Code shows "
+                            f"'Jump to bottom') — its current state is not on "
+                            f"screen, so nothing is done there until the view "
+                            f"is back at the bottom")
+                    elif (self._scroll_back_s > 0
+                            and st.scrolled_since is not None
+                            and now - st.scrolled_since
+                            >= timedelta(seconds=self._scroll_back_s)):
+                        # Left scrolled, a window would be skipped for good —
+                        # a limit coming due or a dropped connection in it
+                        # would go unanswered all night. After the set time,
+                        # send Claude Code's own jump-to-bottom key; the next
+                        # pass reads the live bottom and handles whatever is
+                        # there. Only the view moves — nothing is typed into
+                        # the conversation. Refused (another window holds the
+                        # foreground) means it is simply tried next pass.
+                        _mins = self._scroll_back_s // 60
+                        _dr = "[dry-run] " if self._dry_run else ""
+                        if send_keys(w, SCROLL_TO_BOTTOM_KEYS,
+                                     dry_run=self._dry_run):
+                            st.scrolled_since = now
+                            self.log.emit(
+                                "fire-quiet",
+                                f"{_dr}scrolled {_wt} back to the bottom "
+                                f"(Ctrl+End) after {_mins} min scrolled up, "
+                                f"so it is watched again")
+                    continue
+                if st.scrolled_away and tail:
+                    st.scrolled_away = False
+                    st.scrolled_since = None
+                    self.log.emit("info", f"{_wt} is back at the bottom")
                 if tail:
                     # Same routine the on-demand rescan runs, so the two
                     # can never disagree about what a screen means.
@@ -1746,6 +1942,27 @@ class Watcher(QObject):
                                             f"{dr}Fable-recover: already on "
                                             f"{_bar!r}, skipping {arg!r} → {_wt}")
                                         advance = True
+                                    elif tail and composer_has_draft(tail):
+                                        # Typed onto a draft, the line is
+                                        # submitted WITH it. Not bounded like
+                                        # the busy hold: proceeding later
+                                        # would do the same harm, only later.
+                                        # Only the draft is checked here, not
+                                        # open prompts: the recovery drives
+                                        # its own dialogs (<esc>/<confirm>,
+                                        # the spent-picker tracking), and its
+                                        # accepted picker lingers in the
+                                        # scrollback looking open.
+                                        if not st.fable_hold_logged:
+                                            st.fable_hold_logged = True
+                                            self.log.emit(
+                                                "info",
+                                                f"{dr}Fable-recover: {_wt} — "
+                                                f"holding {arg!r}: the input "
+                                                f"box holds unsent text")
+                                        st.status = ST_FABLE
+                                        self._retick_soon(15000)
+                                        continue
                                     else:
                                         self.log.emit(
                                             "fire",
@@ -2472,6 +2689,19 @@ class Watcher(QObject):
                         # API published them as plain log lines, so a
                         # companion program watching 'fire' never learned the
                         # window was about to change under it.
+                        _hold = (None if force_fire else typing_hold_reason(
+                            tail, self._patterns.get("chooser")))
+                        if _hold:
+                            if not st.hold_logged:
+                                st.hold_logged = True
+                                self.log.emit(
+                                    "info",
+                                    f"{stuck_reason} on {_wt}, but {_hold} — "
+                                    f"not typing 'continue' over it; "
+                                    f"looking again next pass")
+                            st.status = ST_RETRY
+                            continue
+                        st.hold_logged = False
                         self.log.emit(
                             "fire" if first else "fire-quiet",
                             f"{dr}resending 'continue' (retry path) → {_wt}"
@@ -2659,6 +2889,18 @@ class Watcher(QObject):
                                     f"session is mid-turn; holding the "
                                     f"'continue' until it goes quiet")
                             continue
+                        _hold = (None if force_fire else typing_hold_reason(
+                            tail, self._patterns.get("chooser")))
+                        if _hold:
+                            if not st.hold_logged:
+                                st.hold_logged = True
+                                self.log.emit(
+                                    "info",
+                                    f"limit on {_wt} is due, but {_hold} — "
+                                    f"holding the 'continue' until it is "
+                                    f"clear")
+                            continue
+                        st.hold_logged = False
                         st.fire_deferred = False
                         st.status = ST_FIRING
                         model = self._model_overrides.get(title_key(title), "")
@@ -2769,7 +3011,22 @@ class Watcher(QObject):
                         if st.af_idle_since is None:
                             st.af_idle_since = now
                         elif (now - st.af_idle_since
+                                >= timedelta(seconds=AFTER_FINISH_SETTLE_S)
+                              and typing_hold_reason(
+                                  tail, self._patterns.get("chooser"))):
+                            # Waiting on the user is not "finished": a
+                            # question or permission prompt stops the
+                            # spinner too, and the prompt's Enter would
+                            # have answered it.
+                            if not st.hold_logged:
+                                st.hold_logged = True
+                                self.log.emit(
+                                    "info",
+                                    f"after-finish on {_wt} is held: "
+                                    f"{typing_hold_reason(tail, self._patterns.get('chooser'))}")
+                        elif (now - st.af_idle_since
                                 >= timedelta(seconds=AFTER_FINISH_SETTLE_S)):
+                            st.hold_logged = False
                             self.log.emit(
                                 "fire",
                                 f"{dr}after-finish → {_wt}: {af_cmd!r}")
@@ -2841,7 +3098,48 @@ class Watcher(QObject):
         self._cmd_skip &= keep
 
         # Snapshot for the GUI.
-        self.snapshot.emit(self._make_snapshot())
+        self._publish_snapshot()
+
+    def api_enqueue(self, job, ticket: _ApiTicket) -> None:
+        """Leave an action for this thread. Called on an HTTP thread.
+
+        deque.append is atomic, so no lock is needed to hand it over; the
+        ticket's own lock is what settles whether it still runs.
+        """
+        self._api_pending.append((job, ticket))
+
+    @pyqtSlot()
+    def api_drain(self) -> None:
+        """Run every waiting external action, on this thread, in order.
+
+        Called by the wake signal between passes and by the pass itself
+        between windows. A ticket the caller has already given up on is
+        dropped here unrun, which is the other half of "busy means nothing
+        was done" (see _ApiTicket).
+        """
+        if self._api_draining:
+            return
+        self._api_draining = True
+        try:
+            while True:
+                try:
+                    job, ticket = self._api_pending.popleft()
+                except IndexError:
+                    return
+                if not ticket.start():
+                    continue
+                try:
+                    job(ticket)
+                except Exception as exc:
+                    ticket.put({"ok": False,
+                                "reason": f"error: {type(exc).__name__}"})
+                if not ticket.done():
+                    # Every api_* slot answers on every path; this is for
+                    # the one that some day forgets, so the caller is not
+                    # left waiting on an action that has finished.
+                    ticket.put({"ok": False, "reason": "error: no_result"})
+        finally:
+            self._api_draining = False
 
     @pyqtSlot(int, object, object)
     def api_send(self, hwnd: int, lines: list, out) -> None:
@@ -2849,12 +3147,12 @@ class Watcher(QObject):
 
         UI Automation is only initialised here, so the HTTP thread cannot do
         this itself -- it hands the job over and waits. Running on this thread
-        also makes the serialisation free: Qt delivers this between passes,
-        never during one, so an external send can never interleave with the
-        keystrokes the tool is sending on its own account.
+        also makes the serialisation free: api_drain runs it between passes
+        or between two windows of one, never in the middle of the tool's own
+        typing.
 
         The result goes back through `out` rather than a return value, since
-        a queued slot invocation has nowhere to return to.
+        the caller is on another thread.
         """
         try:
             if self._dry_run:
@@ -2864,16 +3162,24 @@ class Watcher(QObject):
                                       f"lines={len(lines)}")
                 out.put({"ok": True, "dry_run": True})
                 return
-            target = None
-            for w in find_terminal_windows():
-                try:
-                    if int(w.NativeWindowHandle or 0) == int(hwnd):
-                        target = w
-                        break
-                except Exception:
-                    continue
+            target = self._api_find(hwnd)
             if target is None:
                 out.put({"ok": False, "reason": "no_window"})
+                return
+            # Text typed after an unsent draft is submitted WITH it, as one
+            # message: a companion's "summarise progress" went out as the
+            # tail of a half-typed sentence (2026-09-27). The same rule every
+            # auto-answer here follows: a draft in the box is the user's, so
+            # nothing is typed and nothing is cleared. The caller decides.
+            # An unreadable screen is not a draft, as elsewhere.
+            try:
+                _screen = read_terminal_text(target) or ""
+            except Exception:
+                _screen = ""
+            if composer_has_draft(_screen[-SCAN_TAIL_CHARS:]):
+                self.log.emit("info", f"api: send hwnd={hwnd:#x} not typed "
+                                      f"— the input box holds unsent text")
+                out.put({"ok": False, "reason": "draft"})
                 return
             # send_text_lines verifies the foreground actually landed on the
             # target and refuses to type otherwise; a False here means nothing
@@ -2892,14 +3198,12 @@ class Watcher(QObject):
                 pass
 
     def _api_find(self, hwnd: int):
-        """The one window with this handle, or None. On the watcher thread."""
-        for w in find_terminal_windows():
-            try:
-                if int(w.NativeWindowHandle or 0) == int(hwnd):
-                    return w
-            except Exception:
-                continue
-        return None
+        """The one window with this handle, or None. On the watcher thread.
+
+        Asked of that window directly rather than by listing the desktop:
+        the listing took up to 9 s on 2026-09-27, and every API call paid it.
+        """
+        return terminal_window_from_handle(hwnd)
 
     @pyqtSlot(int, str, object)
     def api_keys(self, hwnd: int, keyspec: str, out) -> None:
@@ -2910,6 +3214,13 @@ class Watcher(QObject):
         send_keys is what decides whether anything is typed at all.
         """
         try:
+            bad = keyspec_problem(keyspec)
+            if bad:
+                # Before the window is touched: no foreground grab for a
+                # request that cannot be typed, and not reported as
+                # 'foreground', which reads as "try again".
+                out.put({"ok": False, "reason": "bad_keyspec", "key": bad})
+                return
             if self._dry_run:
                 self.log.emit("fire", f"[dry-run] api: keys hwnd={hwnd:#x} "
                                       f"{summarize_keyspec(keyspec)}")
@@ -3015,6 +3326,9 @@ class Watcher(QObject):
                             seen_at=st.prompt_at.isoformat()
                             if st.prompt_at else None)
                        if st.prompt else None),
+            # Which of two readings is newer, for a caller mixing the list
+            # with rescans: the list's own "ts" is when it was SERVED.
+            "read_utc": st.read_at,
         }
 
     def _read_derived(self, st, tail: str, now) -> None:
@@ -3024,6 +3338,7 @@ class Watcher(QObject):
         about what a screen means. Only the things that are READ live here —
         deciding to type is the tick's business alone.
         """
+        st.read_at = now
         st.running = bool(session_running(tail))
         _p = classify_prompt(
             tail,
@@ -3035,7 +3350,9 @@ class Watcher(QObject):
         # seen_at marks when THIS prompt appeared, not when it was last seen:
         # a watch showing "waiting 4 min" needs the former, and re-stamping it
         # every pass would make every prompt look brand new forever.
-        if _p != st.prompt:
+        # Compared by identity, not the whole dict: the dict now carries the
+        # cursor and the check boxes, and moving the cursor is the same prompt.
+        if _prompt_ident(_p) != _prompt_ident(st.prompt):
             st.prompt_at = now if _p else None
         st.prompt = _p
 
@@ -3083,12 +3400,31 @@ class Watcher(QObject):
                 out.put({"ok": False, "reason": "read_blind"})
                 return
             self._read_derived(st, tail, datetime.now(pytz.UTC))
+            # Into the list too, BEFORE answering. /windows served the last
+            # pass's rows, so a caller that rescanned and then listed was
+            # told the prompt was there and then that it was not, for up to
+            # a pass (2026-09-27, Claude Control's approval page reopening
+            # every few seconds). Published first, a list read after this
+            # answer can never be older than it.
+            self._publish_snapshot()
             out.put({"ok": True, "window": self._snapshot_row(st)})
         except Exception as exc:
             try:
                 out.put({"ok": False, "reason": f"error: {type(exc).__name__}"})
             except Exception:
                 pass
+
+    def _publish_snapshot(self) -> None:
+        """Hand the current rows to the GUI and to the local API.
+
+        `latest_rows` is read by the API from its own thread. Rebinding one
+        attribute is atomic, and a published list is never changed after,
+        so no lock is needed; it is set before the signal so that nothing
+        which happens after this call can see older rows than it.
+        """
+        rows = self._make_snapshot()
+        self.latest_rows = rows
+        self.snapshot.emit(rows)
 
     def _make_snapshot(self) -> list:
         out = []
@@ -3247,6 +3583,9 @@ class Updater(QObject):
 
     @pyqtSlot(dict)
     def download_and_stage(self, rel: dict) -> None:
+        if (Path(sys.executable).parent / "Auto-Continue.version").is_file():
+            self.download_failed.emit("Control integration: update the matching Control package; independent binary replacement is disabled")
+            return
         try:
             dest = updater.staged_exe_path()
             size = int(rel.get("asset_size") or 0)
@@ -3281,9 +3620,9 @@ class Updater(QObject):
 
 
 # Shared named objects for single-instance coordination (session-scoped).
-_MUTEX_NAME = "Local\\AutoContinueGuiSingleton"
-_SHOW_EVENT_NAME = "Local\\AutoContinueShowEvent"
-_ACK_EVENT_NAME = "Local\\AutoContinueAckEvent"
+_MUTEX_NAME = "Local\\AutoContinueGuiSingleton" + os.environ.get("AUTO_CONTINUE_INSTANCE_SUFFIX", "")
+_SHOW_EVENT_NAME = "Local\\AutoContinueShowEvent" + os.environ.get("AUTO_CONTINUE_INSTANCE_SUFFIX", "")
+_ACK_EVENT_NAME = "Local\\AutoContinueAckEvent" + os.environ.get("AUTO_CONTINUE_INSTANCE_SUFFIX", "")
 
 
 class _ShowListener(QThread):
@@ -3391,13 +3730,13 @@ class MainWindow(CodexGuiMixin, QMainWindow):
     sig_codex_fire = pyqtSignal(int)
     sig_codex_skip = pyqtSignal(int)
     sig_codex_cooldown = pyqtSignal(int)
-    sig_codex_app_bind = pyqtSignal(dict)
     sig_codex_app_start = pyqtSignal()
     sig_codex_app_stop = pyqtSignal()
     sig_codex_app_config = pyqtSignal(dict)
     sig_codex_app_fire = pyqtSignal(int)
     sig_codex_app_skip = pyqtSignal(int)
     sig_codex_app_cooldown = pyqtSignal(int)
+    sig_codex_app_bind = pyqtSignal(dict)
     sig_set_interval = pyqtSignal(int)
     sig_set_buffer = pyqtSignal(int)
     sig_set_retry_interval = pyqtSignal(int)
@@ -3409,13 +3748,10 @@ class MainWindow(CodexGuiMixin, QMainWindow):
     sig_unexclude = pyqtSignal(str)
     sig_clear_cooldown = pyqtSignal(int)
     sig_set_effort_overrides = pyqtSignal(dict)
-    # (hwnd, lines, result-queue) — the local API hands typing over to
-    # the watcher thread, which is the only one with UIA initialised.
-    sig_api_send = pyqtSignal(int, object, object)
-    sig_api_keys = pyqtSignal(int, str, object)
-    sig_api_focus = pyqtSignal(int, object)
-    sig_api_text = pyqtSignal(int, int, object)
-    sig_api_scan = pyqtSignal(int, object)
+    # The local API leaves its actions in the watcher's queue (UIA is only
+    # initialised on that thread) and this wakes the watcher to run them
+    # when it is between passes. Mid-pass it gets to them on its own.
+    sig_api_wake = pyqtSignal()
     # Delivered to the GUI thread (settings touch widgets). Emitted from
     # an HTTP thread, so Qt queues it — see _api_do_settings for why a
     # timer cannot do this job.
@@ -3424,6 +3760,7 @@ class MainWindow(CodexGuiMixin, QMainWindow):
     sig_set_after_finish = pyqtSignal(dict)
     sig_set_after_finish_loops = pyqtSignal(dict)
     sig_set_auto_answer = pyqtSignal(bool, bool)
+    sig_set_scroll_back = pyqtSignal(int)
     sig_set_fable_config = pyqtSignal(dict)
     sig_set_trigger_patterns = pyqtSignal(dict)
     # Into the updater (its own thread).
@@ -3433,10 +3770,12 @@ class MainWindow(CodexGuiMixin, QMainWindow):
     def __init__(self):
         super().__init__()
         self._init_cli_gui()
+        self._dry_run_enabled = False  # Debug preference; no GUI control.
         self.setWindowTitle(f"Auto-Continue v{APP_VERSION} · Claude / Codex")
         self.resize(1060, 760)
 
-        self.settings = QSettings("auto_continue", "gui")
+        profile = os.environ.get("AUTO_CONTINUE_SETTINGS_FILE")
+        self.settings = QSettings(profile, QSettings.Format.IniFormat) if profile else QSettings("auto_continue", "gui")
         self._latest_snapshot: list = []
         # Local API: the object exists even when the listener is switched off,
         # so _api_apply() can be called unconditionally from either direction.
@@ -3470,8 +3809,8 @@ class MainWindow(CodexGuiMixin, QMainWindow):
         self._after_finish: dict = {}
         self._after_finish_loops: dict = {}
         self._auto_choose = False
-        self._dry_run_enabled = False
         self._auto_permission = True
+        self._scroll_back_min = DEFAULT_SCROLL_BACK_MIN
         # Fable refusal-recovery config (Advanced dialog). Empty pattern =
         # use the built-in default.
         self._fable_cfg: dict = {
@@ -3526,6 +3865,15 @@ class MainWindow(CodexGuiMixin, QMainWindow):
         self._build_worker()
         self._build_updater()
         self._load_settings()
+        controller_pid = os.environ.get('AUTO_CONTINUE_CONTROL_OWNER_PID')
+        if controller_pid:
+            from control_service import ProcessLifetime
+            self._control_parent = ProcessLifetime(int(controller_pid))
+            self._control_watchdog = QTimer(self)
+            self._control_watchdog.setInterval(1000)
+            self._control_watchdog.timeout.connect(
+                lambda: self.close() if not self._control_parent.alive() else None)
+            self._control_watchdog.start()
 
         # React to OS-level theme flips. Safe to skip on older Qt builds.
         try:
@@ -3890,11 +4238,7 @@ class MainWindow(CodexGuiMixin, QMainWindow):
         self.sig_exclude.connect(self.worker.cmd_exclude)
         self.sig_unexclude.connect(self.worker.cmd_unexclude)
         self.sig_clear_cooldown.connect(self.worker.cmd_clear_cooldown)
-        self.sig_api_send.connect(self.worker.api_send)
-        self.sig_api_keys.connect(self.worker.api_keys)
-        self.sig_api_focus.connect(self.worker.api_focus)
-        self.sig_api_text.connect(self.worker.api_text)
-        self.sig_api_scan.connect(self.worker.api_scan)
+        self.sig_api_wake.connect(self.worker.api_drain)
         self.sig_api_settings.connect(self._api_apply_settings)
         self.sig_set_effort_overrides.connect(self.worker.set_effort_overrides)
         self.sig_set_model_overrides.connect(self.worker.set_model_overrides)
@@ -3902,6 +4246,7 @@ class MainWindow(CodexGuiMixin, QMainWindow):
         self.sig_set_after_finish_loops.connect(
             self.worker.set_after_finish_loops)
         self.sig_set_auto_answer.connect(self.worker.set_auto_answer)
+        self.sig_set_scroll_back.connect(self.worker.set_scroll_back)
         self.sig_set_fable_config.connect(self.worker.set_fable_config)
         self.sig_set_trigger_patterns.connect(
             self.worker.set_trigger_patterns)
@@ -3914,6 +4259,23 @@ class MainWindow(CodexGuiMixin, QMainWindow):
         self.worker.running_changed.connect(self._on_claude_running)
         self._build_codex_worker()
 
+        from control_service import CodexService, CAPABILITIES
+        self.codex_service = CodexService(self.codex_worker, self.codex_app_worker)
+        self.codex_service.monitors['claude'] = self.worker
+        self.codex_service.monitor_export = self._control_export_settings
+        self.codex_service.moveToThread(self.worker_thread)
+        for signal, monitor, slot in (
+                (self.sig_claude_start, self.worker, self.codex_service.start_claude),
+                (self.sig_codex_start, self.codex_worker, self.codex_service.start_codex),
+                (self.sig_codex_app_start, self.codex_app_worker, self.codex_service.start_codex_app)):
+            signal.disconnect(monitor.start)
+            signal.connect(slot)
+        self.codex_service.publish.connect(lambda event, body: self._api_publish(event, body))
+        self.codex_service.spent.connect(self._on_codex_rpc_loops_spent)
+        self.codex_service.rpc_snapshot.connect(self._on_codex_rpc_snapshot)
+        self._local_api.ctx.update(capabilities=CAPABILITIES, codex_service=self.codex_service)
+        if "--selftest" not in sys.argv:
+            self.worker_thread.started.connect(self.codex_service.start)
         self.worker_thread.start()
         # Only now: the API hands sends to the watcher, so there has to be a
         # watcher to hand them to before anything can connect.
@@ -4181,6 +4543,8 @@ class MainWindow(CodexGuiMixin, QMainWindow):
         self._auto_choose = False
         self._auto_permission = True
         self.sig_set_auto_answer.emit(False, True)
+        self._scroll_back_min = DEFAULT_SCROLL_BACK_MIN
+        self.sig_set_scroll_back.emit(DEFAULT_SCROLL_BACK_MIN)
         self.sig_set_trigger_patterns.emit({})
         self.sig_set_fable_config.emit(dict(self._fable_cfg))
         self._save_settings()
@@ -4271,6 +4635,21 @@ class MainWindow(CodexGuiMixin, QMainWindow):
     def _api_enabled(self) -> bool:
         return bool(self.settings.value("local_api/enabled", True, type=bool))
 
+    def _control_export_settings(self):
+        import json
+        profile = os.environ.get('AUTO_CONTINUE_SETTINGS_FILE')
+        store = QSettings(profile, QSettings.Format.IniFormat) if profile else QSettings('auto_continue', 'gui')
+        store.sync()
+        values = {}
+        for key in store.allKeys():
+            if key.startswith(('local_api/', 'updates/', 'update/', 'boot')) and key != 'local_api/text':
+                continue
+            value = store.value(key)
+            try: json.dumps(value)
+            except (TypeError, ValueError): continue
+            values[key] = value
+        return values
+
     def _api_port(self) -> int:
         try:
             return int(self.settings.value("local_api/port",
@@ -4292,60 +4671,78 @@ class MainWindow(CodexGuiMixin, QMainWindow):
         """Whatever the last pass saw. Deliberately not a fresh UIA sweep:
         that would run on the HTTP thread, where UIA is not initialised, and
         it would let any caller slow the watcher down by polling."""
-        rows = []
-        for r in (self._latest_snapshot or []):
-            if r.get("provider", "claude") != "claude":
-                continue
-            row = dict(r)
-            for k in ("reset_utc", "last_sent_utc", "retry_last_sent_utc"):
-                v = row.get(k)
-                row[k] = v.isoformat() if hasattr(v, "isoformat") else None
-            rows.append(row)
-        return {"ts": int(time.time() * 1000), "windows": rows}
+        src = getattr(self.worker, "latest_rows", None)
+        if src is None:
+            src = [r for r in self._latest_snapshot
+                   if r.get("provider", "claude") == "claude"]
+        return {"ts": int(time.time() * 1000),
+                "windows": [_api_row(r) for r in src]}
 
-    def _api_handoff(self, emit, rate_limited: bool = True,
+    def _api_handoff(self, job, rate_limited: bool = True,
                      hwnd: int = 0) -> dict:
         """Put an action on the watcher thread and wait for its answer.
 
         Every external action goes through here so they all get the same
-        three refusals — no watcher, too soon, mid-pass — rather than each
+        refusals (no watcher, too soon, not reached in time) rather than each
         endpoint inventing its own idea of when it is safe to act.
+
+        "busy" means nothing was done, and a caller may safely retry. It is
+        only answered after the action has been withdrawn unstarted. Once
+        the watcher has started it, typing is under way, and the only honest
+        answer is the one it produces, so that is waited for.
         """
-        if self.worker is None:
+        worker = self.worker
+        if worker is None:
             return {"ok": False, "reason": "disabled"}
+        if getattr(getattr(self, 'codex_service', None), 'monitor_owner', ''):
+            return {"ok": False, "reason": "monitor_paused"}
         now = time.time()
+        key = int(hwnd)
+        prev = self._api_last_send.get(key, 0.0)
         if rate_limited:
-            if now - self._api_last_send.get(int(hwnd), 0.0) < \
-                    local_api.MIN_SEND_GAP_S:
+            if now - prev < local_api.MIN_SEND_GAP_S:
                 return {"ok": False, "reason": "rate_limited"}
-        if getattr(self.worker, "_in_tick", False):
-            # Say so rather than queue it: the contract leaves it to the caller
-            # whether a keystroke several seconds late is still wanted.
+            self._api_last_send[key] = now
+        ticket = _ApiTicket()
+        worker.api_enqueue(job, ticket)
+        self.sig_api_wake.emit()
+        if ticket.wait(local_api.SEND_TIMEOUT_S):
+            return ticket.result
+        if ticket.cancel():
+            if rate_limited:
+                # Nothing happened, so an immediate retry is not the caller
+                # repeating itself and must not be throttled as one.
+                self._api_last_send[key] = prev
             return {"ok": False, "reason": "busy"}
-        if rate_limited:
-            self._api_last_send[int(hwnd)] = now
-        out = queue.Queue(1)
-        emit(out)
-        try:
-            return out.get(timeout=local_api.SEND_TIMEOUT_S)
-        except Exception:
-            return {"ok": False, "reason": "busy"}
+        if ticket.wait(local_api.STARTED_WAIT_S):
+            return ticket.result
+        # Started and still not finished: it may well have typed. Saying
+        # busy here would be the very lie this replaced.
+        return {"ok": False, "reason": "unfinished"}
 
     def _api_do_send(self, hwnd: int, lines: list) -> dict:
+        w = self.worker
         return self._api_handoff(
-            lambda out: self.sig_api_send.emit(int(hwnd), list(lines), out),
+            lambda out: w.api_send(int(hwnd), list(lines), out),
             hwnd=hwnd)
 
     def _api_do_keys(self, hwnd: int, keyspec: str) -> dict:
+        # Checked here too, before the rate limit: a spec that cannot be
+        # typed did nothing, so it must not throttle the corrected retry.
+        bad = keyspec_problem(keyspec)
+        if bad:
+            return {"ok": False, "reason": "bad_keyspec", "key": bad}
+        w = self.worker
         return self._api_handoff(
-            lambda out: self.sig_api_keys.emit(int(hwnd), str(keyspec), out),
+            lambda out: w.api_keys(int(hwnd), str(keyspec), out),
             hwnd=hwnd)
 
     def _api_do_focus(self, hwnd: int) -> dict:
         # Not rate-limited: raising a window twice in a row is harmless and a
         # UI that follows the user's attention may legitimately ask often.
+        w = self.worker
         return self._api_handoff(
-            lambda out: self.sig_api_focus.emit(int(hwnd), out),
+            lambda out: w.api_focus(int(hwnd), out),
             rate_limited=False)
 
     def _api_do_scan(self, hwnd: int) -> dict:
@@ -4362,15 +4759,23 @@ class MainWindow(CodexGuiMixin, QMainWindow):
                 local_api.MIN_SCAN_GAP_S:
             return {"ok": False, "reason": "rate_limited"}
         self._api_last_scan[int(hwnd)] = now
-        return self._api_handoff(
-            lambda out: self.sig_api_scan.emit(int(hwnd), out),
+        w = self.worker
+        r = self._api_handoff(
+            lambda out: w.api_scan(int(hwnd), out),
             rate_limited=False)
+        # The row carries datetimes, which JSON cannot hold: a rescan of any
+        # window that had ever been sent a 'continue' failed to serialise
+        # and the caller got no reply at all (found 2026-09-27).
+        if isinstance(r, dict) and isinstance(r.get("window"), dict):
+            r = dict(r, window=_api_row(r["window"]))
+        return r
 
     def _api_do_text(self, hwnd: int, tail: int) -> dict:
         # Reading changes nothing, so no rate limit — but it still crosses to
         # the watcher, because UIA only works there.
+        w = self.worker
         return self._api_handoff(
-            lambda out: self.sig_api_text.emit(int(hwnd), int(tail), out),
+            lambda out: w.api_text(int(hwnd), int(tail), out),
             rate_limited=False)
 
     def _api_health(self) -> None:
@@ -4397,7 +4802,8 @@ class MainWindow(CodexGuiMixin, QMainWindow):
                     local_api.discovery_path()):
                 try:
                     local_api.write_discovery(
-                        self._api_port(), self._api_token(), APP_VERSION)
+                        self._api_port(), self._api_token(), APP_VERSION,
+                        exe=_discovery_exe())
                     self._append_log(
                         "warn",
                         "local API token file had gone missing — written "
@@ -4427,6 +4833,9 @@ class MainWindow(CodexGuiMixin, QMainWindow):
                     "cannot reach it until this is sorted out")
 
     def _api_publish(self, event: str, data) -> None:
+        if event == 'monitor' and isinstance(data, dict):
+            self.start_btn.setEnabled(not data.get('paused'))
+            self.start_btn.setToolTip('Paused by Codex Claude Control' if data.get('paused') else '')
         """Fan an event out to SSE subscribers, never letting that fail here.
 
         This is called from the log and snapshot paths, which must keep
@@ -4453,7 +4862,6 @@ class MainWindow(CodexGuiMixin, QMainWindow):
         Marshalled onto the GUI thread because it touches widgets; the HTTP
         thread only waits for the answer.
         """
-        out = queue.Queue(1)
         # A signal, not QTimer.singleShot. singleShot creates its timer in the
         # CALLING thread, and this is called on an HTTP thread that has no Qt
         # event loop — so the timer never fired, the handler never ran, and
@@ -4463,13 +4871,21 @@ class MainWindow(CodexGuiMixin, QMainWindow):
         # threads was never executed by any of them. A signal emitted from a
         # foreign thread is delivered queued to the receiver's own thread,
         # which is exactly what send/keys/focus already rely on.
-        self.sig_api_settings.emit(dict(changes), out)
-        try:
-            return out.get(timeout=local_api.SEND_TIMEOUT_S)
-        except Exception:
+        # A ticket, for the same reason as _api_handoff: a timed-out change
+        # must not land later, after the caller was told it did not.
+        ticket = _ApiTicket()
+        self.sig_api_settings.emit(dict(changes), ticket)
+        if ticket.wait(local_api.SEND_TIMEOUT_S):
+            return ticket.result
+        if ticket.cancel():
             return {"ok": False, "reason": "busy"}
+        if ticket.wait(local_api.STARTED_WAIT_S):
+            return ticket.result
+        return {"ok": False, "reason": "unfinished"}
 
     def _api_apply_settings(self, changes: dict, out) -> None:
+        if isinstance(out, _ApiTicket) and not out.start():
+            return          # the caller already heard busy; change nothing
         try:
             for key, want in changes.items():
                 want = bool(want)
@@ -4516,7 +4932,8 @@ class MainWindow(CodexGuiMixin, QMainWindow):
             ok, err = self._local_api.start(self._api_port())
             if ok:
                 path = local_api.write_discovery(
-                    self._api_port(), self._api_token(), APP_VERSION)
+                    self._api_port(), self._api_token(), APP_VERSION,
+                    exe=_discovery_exe())
                 self._append_log(
                     "info",
                     f"local API listening on 127.0.0.1:{self._api_port()} — "
@@ -4551,6 +4968,14 @@ class MainWindow(CodexGuiMixin, QMainWindow):
         lay.addWidget(btns)
         dlg.exec()
 
+    def _open_app_settings(self) -> None:
+        controls = {"autostart": self.autostart_check, "boot": self.boot_check,
+                    "keep_awake": self.keep_awake_check}
+        dlg = AppSettingsDialog(self, controls)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            for key, value in dlg.values().items():
+                controls[key].setChecked(value)
+
     def _open_advanced(self) -> None:
         # Current watched windows (title_key -> display) for the opt-in list.
         # Persisted opt-ins not currently open are re-added inside the dialog
@@ -4565,7 +4990,8 @@ class MainWindow(CodexGuiMixin, QMainWindow):
         dlg = AdvancedDialog(self, dict(self._fable_cfg), seen,
                              dict(self._trigger_patterns),
                              {"choose": self._auto_choose,
-                              "permission": self._auto_permission},
+                              "permission": self._auto_permission,
+                              "scroll_back_min": self._scroll_back_min},
                              {"autostart": self.autostart_check.isChecked(),
                               "boot": self.boot_check.isChecked(),
                               "keep_awake": self.keep_awake_check.isChecked()}, scope="claude")
@@ -4600,6 +5026,15 @@ class MainWindow(CodexGuiMixin, QMainWindow):
                 or _auto["permission"] != self._auto_permission)
             self._auto_choose = _auto["choose"]
             self._auto_permission = _auto["permission"]
+            if _auto["scroll_back_min"] != self._scroll_back_min:
+                self._scroll_back_min = _auto["scroll_back_min"]
+                self._append_log(
+                    "info",
+                    "scroll-back: "
+                    + (f"a window left scrolled up is jumped back to the "
+                       f"bottom after {self._scroll_back_min} min"
+                       if self._scroll_back_min else "off"))
+            self.sig_set_scroll_back.emit(self._scroll_back_min)
             self.sig_set_auto_answer.emit(self._auto_choose,
                                           self._auto_permission)
             if _auto_changed:
@@ -4693,9 +5128,7 @@ class MainWindow(CodexGuiMixin, QMainWindow):
             self.retry_spin.setValue(
                 self._settings_int("retry_interval", DEFAULT_RETRY_S)
             )
-            self._dry_run_enabled = (
-                self.settings.value("dry_run", False, type=bool)
-            )
+            self._dry_run_enabled = self.settings.value("dry_run", False, type=bool)
             self.keep_awake_check.setChecked(
                 self.settings.value("keep_awake", False, type=bool)
             )
@@ -4762,6 +5195,8 @@ class MainWindow(CodexGuiMixin, QMainWindow):
                 "auto_choose", False, type=bool)
             self._auto_permission = self.settings.value(
                 "auto_permission", True, type=bool)
+            self._scroll_back_min = max(0, self._settings_int(
+                "scroll_back_min", DEFAULT_SCROLL_BACK_MIN))
             raw_f = self.settings.value("fable_cfg", "", type=str) or ""
             try:
                 loaded_f = json.loads(raw_f) if raw_f else {}
@@ -4826,6 +5261,7 @@ class MainWindow(CodexGuiMixin, QMainWindow):
         self.sig_set_after_finish_loops.emit(dict(self._after_finish_loops))
         self.sig_set_auto_answer.emit(self._auto_choose,
                                       self._auto_permission)
+        self.sig_set_scroll_back.emit(self._scroll_back_min)
         self.sig_set_fable_config.emit(dict(self._fable_cfg))
         self.sig_set_trigger_patterns.emit(dict(self._trigger_patterns))
         if self._migrated_fable_steps:
@@ -4899,6 +5335,7 @@ class MainWindow(CodexGuiMixin, QMainWindow):
         )
         self.settings.setValue("auto_choose", self._auto_choose)
         self.settings.setValue("auto_permission", self._auto_permission)
+        self.settings.setValue("scroll_back_min", self._scroll_back_min)
         self.settings.setValue("fable_cfg", json.dumps(self._fable_cfg))
         self.settings.setValue(
             "trigger_patterns", json.dumps(self._trigger_patterns))
@@ -4967,6 +5404,13 @@ class MainWindow(CodexGuiMixin, QMainWindow):
     @pyqtSlot(str, str)
     def _append_log(self, level: str, message: str) -> None:
         ts = datetime.now().strftime("%H:%M:%S")
+        log_file = os.environ.get('AUTO_CONTINUE_LOG_FILE')
+        if log_file:
+            try:
+                with open(log_file, 'a', encoding='utf-8') as file:
+                    file.write(f'{ts} [{level}] {message}\n')
+            except OSError:
+                pass
         # "fire-quiet" is a fire that skips the balloon; nothing downstream of
         # here should be able to tell the difference, so normalise it now and
         # keep the one difference in the one place it belongs.
@@ -5066,7 +5510,7 @@ class MainWindow(CodexGuiMixin, QMainWindow):
             tabs = row.get("tabs", 1)
             provider = row.get("provider", "claude")
             activity = bool(row.get("activity_row"))
-            thread_id = row.get("thread_id", "") if provider == "codex_app" else ""
+            thread_id = row.get("thread_id", "")
             is_codex = provider in ("codex", "codex_app")
             if is_codex:
                 codex_config = self._codex_row_config(row)
@@ -5310,6 +5754,19 @@ class MainWindow(CodexGuiMixin, QMainWindow):
                     self.table.selectRow(r)
                     break
 
+    @staticmethod
+    def _activity_time(row) -> str:
+        stamp = row.get("updated_utc") if row.get("activity_row") else row.get("read_utc") or row.get("last_sent_utc")
+        return stamp.astimezone().strftime("%m-%d %H:%M:%S") if stamp else "—"
+
+    def _refresh_activity_times(self) -> None:
+        if self._view_provider != "codex_app":
+            return
+        for r, row in enumerate(self._latest_snapshot):
+            item = self.table.item(r, 4)
+            if item:
+                item.setText(self._activity_time(row))
+
     def _refresh_countdowns(self) -> None:
         # Lightweight repaint of column 3 only — avoids rebuilding action
         # widgets every second.
@@ -5532,6 +5989,8 @@ class MainWindow(CodexGuiMixin, QMainWindow):
         # mode is reached via the minimize button instead.
         self._save_settings()
         self._stop_local_api()
+        if hasattr(self, "codex_service"):
+            self.codex_service.close()
         # Release the wake-lock so the system can sleep normally after we
         # quit. SetThreadExecutionState requests are process-scoped — the
         # OS clears them on process exit too, but doing it explicitly here
@@ -5553,29 +6012,6 @@ class MainWindow(CodexGuiMixin, QMainWindow):
         # to quit explicitly.
         QApplication.instance().quit()
 
-    @staticmethod
-    def _activity_time(row) -> str:
-        stamp = row.get("updated_utc") if row.get("activity_row") else row.get("read_utc") or row.get("last_sent_utc")
-        return stamp.astimezone().strftime("%m-%d %H:%M:%S") if stamp else "—"
-
-
-    def _refresh_activity_times(self) -> None:
-        if self._view_provider != "codex_app":
-            return
-        for r, row in enumerate(self._latest_snapshot):
-            item = self.table.item(r, 4)
-            if item:
-                item.setText(self._activity_time(row))
-
-
-    def _open_app_settings(self) -> None:
-        controls = {"autostart": self.autostart_check, "boot": self.boot_check,
-                    "keep_awake": self.keep_awake_check}
-        dlg = AppSettingsDialog(self, controls)
-        if dlg.exec() == QDialog.DialogCode.Accepted:
-            for key, value in dlg.values().items():
-                controls[key].setChecked(value)
-
 
 # ---------------------------------------------------------------------------
 # In-app help
@@ -5585,42 +6021,36 @@ class MainWindow(CodexGuiMixin, QMainWindow):
 # are not about to go browsing GitHub.
 HELP_HTML = """
 <h2>Auto-Continue v{version}</h2>
-<h3>Codex EXE, Codex CLI and Claude CLI</h3>
-<p>Enable any combination with the three monitor tabs. Each tab shows its own
-settings and the shared session table; the activity log stays below. App settings
-contains global startup and keep-awake options. Dry-run is hidden from the GUI.</p>
-<p>Codex EXE lists five recent Codex activities by default (Recent: 1–100).
-Every activity can be configured independently, including duplicate titles.
-Hidden activities can be listed and configured; input requires a verified binding
-to a visible native Codex conversation. ChatGPT and Work are excluded.</p>
-<p>Codex Advanced offers Full access (default), Approve for me and Ask for approval,
-with automatic tool permission approval on by default. Turning it off holds a
-permission request. Ordinary choosers and login prompts still require attention.
-Native model/effort controls and submission confirmation prevent premature budget
-consumption. CLI and EXE detection, settings and budgets remain independent.</p>
-<h3>Claude CLI details</h3>
-<p>A watchdog for Claude Code running in Windows Terminal. It reads each
-window's scrollback, notices when a session has stopped for a reason you can
-fix by typing something, waits for the right moment, and types it for you —
-so a session that stalls at 2am is still working when you come back.</p>
+<p>A watchdog for Claude CLI, Codex EXE (the desktop App), and Codex CLI.
+Select the types you want to monitor; each type has its own settings and
+driver. It detects stalled sessions and sends the configured continuation
+when the session is ready.</p>
 <p>It never invents work. Every keystroke it sends is either something you
 configured or the single word <code>continue</code>, and it only sends it
 when the screen says the session is stuck.</p>
 
 <h3>Getting started</h3>
 <ol>
+<li>Switch between the <b>Codex EXE</b>, <b>Codex CLI</b> and <b>Claude CLI</b>
+tabs to view each type's settings and sessions. Enable <b>Monitor this type</b>
+on the types you want to watch. Switching tabs preserves background monitoring.
+Poll, Buffer and Retry belong to each type separately. <b>App settings</b>
+holds shared start-up and keep-awake options; <b>More</b> holds Help,
+Export log and Check updates.</li>
 <li>Leave your Claude Code sessions running in Windows Terminal. Each
 <b>window</b> is watched separately. Background <i>tabs</i> are invisible to
 Windows Terminal's accessibility layer, so a window with several tabs is
 marked <b>&#9888; N tabs</b> and only its active tab is watched — drag tabs
 out into their own windows for full coverage.</li>
-<li>Press <b>Start</b>. The dot turns green and the table fills with every
-terminal window found.</li>
+<li>Press <b>Start</b>. The dot turns green and the table fills with windows
+for the current tab. The Codex EXE tab shows recent local Codex sessions, including
+background Codex sessions, in the same table as live Codex windows. The card's
+<b>Recent activities</b> setting controls the count (default 5).
+Only Codex sessions are monitored; ChatGPT and ChatGPT Work conversations are
+excluded. Automatic continue acts on the visible Codex session in each App window.</li>
 <li>That's it. Leave it running. Nothing is typed until a session actually
 needs it.</li>
 </ol>
-<p>Dry-run is an internal saved diagnostic setting; it is hidden from the GUI.</p>
-
 <h3>What it reacts to</h3>
 <ul>
 <li><b>The 5-hour usage limit.</b> Reads the reset time from the banner,
@@ -5643,7 +6073,17 @@ is treated as a limit that has lifted, and resumed straight away. Plain
 <i>tomorrow</i> and park the session for a day.</li>
 <li><b>Network stalls.</b> Retry-exhausted banners (<i>attempt N/N</i>) and
 bare API connection errors get one <code>continue</code> every <b>Retry
-interval</b> (10 minutes by default) until the connection comes back.
+interval</b> (10 minutes by default) until the connection comes back. A
+connection error is recognised by the <b>error code</b> it carries — the
+upper-case name in parentheses, such as <code>ECONNRESET</code> or
+<code>ETIMEDOUT</code> — not by the sentence in front of it, because that
+sentence keeps being reworded (three times in two weeks, and each rewording
+left sessions sitting idle until the pattern caught up). Recovery is
+recognised two ways: the session caught mid-turn, or a whole turn — your
+prompt, then its <i>done</i> stamp — sitting below the error. The second
+matters for a session that is only waiting on background work: it answers a
+<code>continue</code> in seconds, between two checks, and used to be poked
+again ten minutes later for nothing.
 Crucially, only while the session is <i>actually</i> stuck: once it is
 streaming again, the error still on screen is just scrollback, and poking it
 would queue prompts that all fire at once when the turn ends. HTTP 500/529
@@ -5660,7 +6100,7 @@ is reported once in the log and never poked at.</li>
 default.</li>
 </ul>
 <p>Everything above is matched with regexes you can edit
-(<b>Advanced &#8594; Triggers</b>), because Anthropic re-words these banners
+(<b>Claude CLI &#8594; More settings &#8594; Triggers</b>), because Anthropic re-words these banners
 without notice. Those patterns track the wording of a <i>current</i> Claude
 Code, and only that: spellings retired by Anthropic — the pre-rename
 <code>/extra-usage</code>, the old "esc to interrupt" spinner — have been
@@ -5675,9 +6115,31 @@ error you pasted. Those used to count, so a session that had simply
 <i>discussed</i> a failure was poked with <code>continue</code> every retry
 interval. They no longer do. The one gap left: prose that happens to wrap so
 the quoted words start a fresh row still looks like the real thing.</p>
+<p><b>It never types over a draft or into an open question.</b> Every line
+this tool types ends with Enter. If the input box already holds text you have
+not sent, the line would go after your text and both would be submitted as
+one message. If a question or a permission prompt is open, the Enter would
+pick whichever option is highlighted, which on a permission prompt is
+"Yes". So a network <code>continue</code>, a limit resume, an After finish
+prompt and a Model recovery line all wait while either is on screen, and go
+out once the box is clear. The log says so once each time. This holds
+wherever the prompt's cursor sits, even after the arrow keys have moved it
+off the first option. <b>Fire now</b> is your own instruction and is not
+held. Before 2.1.4, After finish in particular could answer a permission
+prompt you had left for yourself.</p>
 
 <h3>The table</h3>
-<p>One row per terminal window. The <b>Status</b> column is the quickest way
+<p>The shared table shows sessions for the current tab. Recent Codex EXE sessions
+can each have their own Model, Effort, Exclude and After finish settings,
+saved by session ID. A matched live window is merged into its session row.
+<b>Open</b> opens a background session; <b>Now</b> continues a bound live window.
+For identical titles, open the exact session and use <b>Actions → Link visible
+Codex window</b> to bind it explicitly. A changed visible conversation clears
+that binding.
+<b>Now</b> is the primary window action;
+<b>Actions</b> holds Skip, Exclude, After finish and Clear cooldown.
+The activity log stays visible at the bottom; drag the divider to resize it.
+The <b>Status</b> column is the quickest way
 to see what the tool thinks is going on:</p>
 <ul>
 <li><b>Idle</b> — watched, nothing wrong.</li>
@@ -5731,6 +6193,13 @@ that.</p>
 then be seen running <i>and</i> finishing again before anything else is
 typed — the prompt is never repeated into a session that is merely
 sitting idle.</p>
+<p><b>A turn is recognised as running by its spinner line's shape</b> — the
+spinner glyph, a verb, an ellipsis — whether or not a timer is showing yet.
+Claude Code's timer comes and goes: a turn's first seconds show none, and a
+turn still waiting for its first byte shows only the elapsed time, with none of
+the usual detail after it. Reading the timer instead of the shape took both
+for finished turns, and a session waiting on a slow API got
+<code>continue</code> queued into it every retry interval.</p>
 <p><b>Waiting on the API counts as running.</b> When a request gets no first
 byte for a while, Claude Code replaces its spinner with <i>No response from the
 API after 6m · retrying once, waiting up to 10m</i> and keeps waiting on its
@@ -5741,8 +6210,8 @@ that waits for a quiet window. If the retry fails too and Claude Code gives
 up with an <code>API Error</code> line saying no response came back, that is a
 stuck session like any other network error, and gets its
 <code>continue</code>.</p>
-<p>The button shows <b>After finish &#10003;</b> once a prompt is set and
-hovering previews it; clearing the text turns the feature off for that
+<p>The Actions menu shows the After finish prompt and remaining loops;
+hovering Actions previews the prompt. Clearing the text turns it off for that
 window.</p>
 <p>Four idle-looking states deliberately never count as "finished":</p>
 <ul>
@@ -5755,7 +6224,7 @@ flight;</li>
 <li>a model recovery in progress — that script owns the window.</li>
 </ul>
 
-<h3>Advanced&#8230; &#8594; Answering</h3>
+<h3>Claude CLI &#8594; More settings &#8594; Answering</h3>
 <p><b>What it is for.</b> Claude Code sometimes stops and asks. A chooser
 appears, the session waits, and nothing else happens until someone picks —
 which, if you stepped away, means the window is idle for the rest of the
@@ -5824,7 +6293,7 @@ which is opt-in for exactly that reason.</p>
 keeps the two switches apart, so a chooser matching it is never answered by
 the first switch.</p>
 
-<h3>Advanced&#8230; &#8594; Local API</h3>
+<h3>Claude CLI &#8594; More settings &#8594; Local API</h3>
 <p>Another program on this machine can ask this one for the window table, and
 ask it to type a line into a window. It exists because driving a Claude Code
 window means enumerating it, checking the foreground really landed on it,
@@ -5845,19 +6314,73 @@ connect. Every line typed on someone else's behalf is written to the log as
 <code>api: send</code> at <b>fire</b> level, so the table and the log still
 show who typed what.</p>
 <p>The tool's own rules still apply to callers: <b>dry-run</b> types nothing
-for them either, a window that is mid-turn is refused rather than queued, and
-a send whose foreground check fails is reported back as refused instead of
-being typed somewhere else.</p>
+for them either, and a send whose foreground check fails is reported back as
+refused instead of being typed somewhere else.</p>
+<p><b><code>busy</code> always means nothing was done.</b> A caller's action
+waits for this tool to be free, which during a pass is the gap between two
+windows, not the end of the whole pass. If it is not reached within ten
+seconds it is withdrawn and the caller hears <code>busy</code>, and a
+withdrawn action is never run later. So retrying a busy is always safe. An
+action that has already started is never answered busy; the caller waits for
+what it really did. Before 2.1.4 a busy action could still be typed once the
+pass ended, so a caller that retried typed it twice.</p>
+<p>Most answers take a few hundredths of a second. The target window is
+looked up by its handle rather than by listing every window on the desktop,
+which took up to nine seconds whenever some other program was slow to
+answer. A pass no longer lists the desktop that way either (see Timings), so
+a request rarely waits more than a moment.</p>
+<p><b>A line is not typed on top of a draft.</b> If the window's input box
+already holds text that has not been sent, a caller's line would be typed
+after it and submitted with it, as one message. So the send is refused as
+<code>draft</code>: nothing is typed, the half-typed text is left exactly as
+it was, and the caller can tell its user. Keystrokes are not checked this
+way, because Enter and Esc act on whatever prompt is open.</p>
+<p>A keystroke spec containing a key name this tool cannot press is refused
+as <code>bad_keyspec</code>, naming the key, before the window is touched.
+Backspace, for instance, is spelled <code>{{Back}}</code>. Anything else
+would type the spec partway and then stop.</p>
+<p>The token file also records where the running copy's exe lives. A
+companion program that needs to start this tool again can then start your
+copy, not an older one it carries.</p>
 <p>A caller can ask for the window list, send a line, send a keystroke (an
 ESC, say), bring a window forward, and subscribe to a live event stream that
 carries every pass, every log line and every time this tool types something
 of its own.</p>
+<p>A caller can also ask for one window to be read again straight away,
+rather than waiting for the next pass. The window list is updated with the
+result before the answer goes back, so the list never says something older
+than a fresh reading the caller has already seen. Every row also carries
+<code>read_utc</code>, the time its screen was last read. Before 2.1.4 the
+list kept the last pass's reading for up to a minute, so a prompt could
+appear and disappear between two calls.</p>
+<p><b>An open prompt is described in full</b>, so a companion can redraw it
+somewhere else, on a watch for instance. When a window is waiting on a
+question, a permission prompt or a plan confirmation, its row carries what
+the screen shows:</p>
+<ul>
+<li>the question, and any title lines above it;</li>
+<li>on a form with several questions, the tabs, and which tab is showing when
+the text alone can tell;</li>
+<li>every option, with its number, its description, whether the cursor is
+on it, whether its box is ticked, whether it was already chosen, and whether
+it is the row you type an answer into;</li>
+<li>the rows under the rule, such as "Chat about this";</li>
+<li>the hint line at the bottom.</li>
+</ul>
+<p>Anything the screen does not show is left empty rather than guessed. The
+conversation itself (a diff, the text of a plan) is not included. A prompt is
+reported wherever its cursor sits, including after the arrow keys have moved
+it. That is only reporting: this tool's own Enter still answers a prompt
+only when the cursor is on the first option, because Enter picks whatever
+row the cursor is on.</p>
 <p><b>What a caller types is counted, not quoted.</b> Every one of those
 actions is written to the log as a keystroke — but the log records what was
 done, not what was said, so a send appears as <code>lines=1</code> and a
 keystroke spec as <code>&lt;24 chars&gt;{{Enter}}</code>: key names stay
 readable, because "did it press Enter?" is the question a log answers, while
-the words themselves are the session's business and not this log's.</p>
+the words themselves are the session's business and not this log's. The
+same key pressed three or more times in a row is written once with a count,
+<code>{{Back}}&#215;80</code>, rather than eighty times.</p>
 <p>A caller can also <b>turn the two answering switches on this tab off, or
 back on</b>, and only those two. A companion program offering approval from a phone or a watch
 is racing this tool: it answers a permission prompt within a pass, so a person
@@ -5874,7 +6397,7 @@ the file paths, whatever is up. Agreeing that a companion program may see the
 table and press Enter is not the same as agreeing it may read the work, so
 that one is asked for on its own and turning it on is written to the log.</p>
 
-<h3>Advanced&#8230; &#8594; Triggers</h3>
+<h3>Claude CLI &#8594; More settings &#8594; Triggers</h3>
 <p>Every detection pattern, editable and case-insensitive. Anthropic re-words
 these banners without warning and a rename silently stops detection — this is
 how you fix that yourself the same day instead of waiting for a new
@@ -5886,6 +6409,13 @@ it tells you whether the pattern matched, which capture groups it produced
 edit), and whether the match sits too far up the scrollback to count at
 runtime — a stale banner thousands of characters back is deliberately
 ignored.</p>
+<p>A pattern also has to be quick. Claude Code pads every line with spaces
+to the width of the window, so a screen is mostly blank space. A pattern that
+lets two or three optional whitespace runs sit side by side can take seconds
+to give up on such a screen, and that happens once per window on every pass.
+The built-in safeguard pattern did exactly this until 2.1.4: several seconds a
+pass on a nearly empty session. If you have a copy of the old one as your own
+pattern, press <b>Reset this</b> on it.</p>
 <p>Edits are validated on OK: the pattern must compile, must keep the capture
 groups the parser indexes, and must not match empty text (which would fire on
 every window). Only patterns you actually changed are stored, so future
@@ -5907,7 +6437,7 @@ size check and hash apply either way.</p>
 an update is slow you can see which source was picked and what each one was
 actually doing at the time.</p>
 
-<h3>Advanced&#8230; &#8594; Model recovery</h3>
+<h3>Claude CLI &#8594; More settings &#8594; Model recovery</h3>
 <p><b>Opt-in and off by default</b>, because it is the one feature that types
 more than <code>continue</code> and changes which model your session runs
 on.</p>
@@ -6021,7 +6551,7 @@ script without one enforces nothing. This is why ticking a window is a bigger
 commitment than leaving it in all-windows mode.</p>
 <p>If <b>you</b> switch a window's model by hand, that is taken as your
 decision: the window is unticked automatically and left alone from then on.
-Tick it again in Advanced to resume enforcement.</p>
+Tick it again in Claude CLI's More settings to resume enforcement.</p>
 <p><b>Step script</b>, one step per line — every line is editable, and the
 shipped default is only a starting point. The editor is sized to show the
 built-in script in full, so what you read is the whole recovery: if a script
@@ -6072,7 +6602,18 @@ therefore not treated as closed — the handle is checked with the OS first —
 because some of what is known about a window cannot be read off the screen a
 second time: how far an in-flight model recovery had got, the hold that
 keeps a session off a model whose allowance is gone, and how recently it was
-last typed into. When that happens the log says so once.</li>
+last typed into. And before giving up on the pass, the windows are listed
+once more two seconds later: the short list is nearly always a momentary
+blip, and a second look lets that pass go ahead with every window instead of
+skipping them for a whole interval. Only if a window is still missing on the
+second look does the log say so, once. A window that was really closed is
+confirmed closed by the OS and costs no wait.
+Since 2.1.4 the list of windows comes from Windows itself, and UI Automation
+is asked only about those windows. Before that, UI Automation listed every
+window on the desktop, one program at a time. One slow program could make a
+pass wait up to nine seconds, and that listing was also where the short
+lists came from. The old listing is still used if Windows' own list
+fails.</li>
 <li><b>Buffer</b> (60s) — extra margin past the stated reset time.</li>
 <li><b>Retry interval</b> (600s) — the gap between <code>continue</code>s
 while a session is network-stuck. Short values just bury the log: an outage
@@ -6082,11 +6623,12 @@ here once ran 90 minutes.</li>
 </ul>
 
 <h3>Starting over</h3>
-<p><b>Reset</b> puts every setting back to how it ships — timings, the
+<p><b>Reset Claude CLI settings&#8230;</b> (at the foot of Claude CLI's
+More settings dialog) restores Claude timings, the
 per-window model and effort overrides, After finish prompts, exclusions,
 trigger patterns, and model recovery (back to off). It asks first and lists
-what it clears. Dry-run, keep-awake and the start-up options are left as they
-are.</p>
+what it clears. Keep-awake and the start-up options are left as they
+are. Each Codex type has its own reset in its More settings dialog.</p>
 <p>Everything else you change is remembered across restarts, so the app comes
 back exactly as you left it.</p>
 
@@ -6095,10 +6637,25 @@ back exactly as you left it.</p>
 <li>Before typing, the target window must actually reach the foreground. If
 Windows refuses — because you are typing somewhere else — the send is retried
 later rather than landing in the wrong app.</li>
-<li><b>Keep awake</b> stops Modern Standby from killing the watcher during a
-long unattended wait.</li>
-<li><b>Start on launch</b> (on by default) means protection resumes by
-itself, including after a self-update.</li>
+<li><b>A session you have scrolled up in is left alone.</b> Newer Claude Code
+draws its own screen, and while you read back through it the live bottom —
+spinner, prompt box, any dialog — is not on screen at all; a <i>Jump to
+bottom</i> hint takes its place. What is showing then is old: an error from an
+hour ago with nothing after it looks exactly like a stuck session. So that
+window is skipped until its view is back at the bottom, and the log says so
+once. A due <code>continue</code> waits rather than going in blind.
+Left scrolled, though, a window would be skipped for good — a limit coming
+due or a dropped connection in it would go unanswered all night. So after
+<b>60 minutes</b> scrolled up (Claude CLI &#8594; More settings &#8594; Answering; 0 = never) it
+is sent <b>Ctrl+End</b>, Claude Code's own jump-to-bottom key, and is watched
+again from the next pass. Only the view moves: nothing is typed into the
+conversation, and the log records it as a keystroke.</li>
+<li><b>Keep awake</b>, <b>Start on launch</b> and <b>Start with Windows</b>
+live in <b>App settings</b>.
+Keep awake stops
+Modern Standby from killing the watcher during a long unattended wait; Start
+on launch (on by default) means protection resumes by itself, including
+after a self-update.</li>
 <li>Only one copy runs at a time; a second launch shows the existing window
 instead of double-typing into the same sessions.</li>
 <li>The minimize button hides to the tray; the X button quits.</li>
@@ -6115,7 +6672,7 @@ project. A window the tool could not read that pass says so in its own line,
 rather than looking identical to a window with nothing on it — that
 difference is the first thing anyone needs when working out, after the fact,
 whether the allowance really came back or the tool simply never looked.</li>
-<li><b>Export log for feedback&#8230;</b> writes a copy of that log with the
+<li><b>Export log&#8230;</b> (main window) writes a copy of that log with the
 window titles and your own typed prompts removed — windows appear as
 <code>#id</code> only — and shows you the whole thing before it writes
 anything. The raw file is safe where it sits and not safe to hand over: a
@@ -6555,12 +7112,25 @@ class AdvancedDialog(QDialog):
 
     def _build_answer_tab(self, tab, auto: dict) -> None:
         root = QVBoxLayout(tab)
+
+        # Group 1: the two Enter answers, with the warning that is ABOUT them
+        # kept inside the same box so it cannot drift away from them.
+        ans_box = QGroupBox("Answer prompts with Enter")
+        ab = QVBoxLayout(ans_box)
         intro = QLabel(
-            "Claude Code sometimes pauses on a chooser and waits. These "
-            "answer it with Enter, which takes the option it already "
-            "pre-selected. See <b>Help</b>.")
+            "Claude Code sometimes pauses on a chooser and waits. Enter takes "
+            "the option it already pre-selected. See <b>Help</b>.")
         intro.setWordWrap(True)
-        root.addWidget(intro)
+        ab.addWidget(intro)
+
+        self.auto_perm_chk = QCheckBox("Answer tool-permission requests")
+        self.auto_perm_chk.setChecked(bool(auto.get("permission", True)))
+        self.auto_perm_chk.setToolTip(
+            "Requests to run a command or edit a file (the ones you see "
+            "when bypass-permissions is off). Answering these AUTHORISES "
+            "the work — turn this off if you want to approve them "
+            "yourself.")
+        ab.addWidget(self.auto_perm_chk)
 
         self.auto_choose_chk = QCheckBox("Answer choosers (off by default)")
         self.auto_choose_chk.setChecked(bool(auto.get("choose", False)))
@@ -6569,30 +7139,49 @@ class AdvancedDialog(QDialog):
             "and picking the first option is what unblocks it. Never fires "
             "while a turn is running, never while you have anything typed "
             "in the input box, and once per chooser.")
-        root.addWidget(self.auto_choose_chk)
-
-        self.auto_perm_chk = QCheckBox(
-            "Answer tool-permission requests")
-        self.auto_perm_chk.setChecked(bool(auto.get("permission", True)))
-        self.auto_perm_chk.setToolTip(
-            "Requests to run a command or edit a file (the ones you see "
-            "when bypass-permissions is off). Answering these AUTHORISES "
-            "the work — turn this off if you want to approve them "
-            "yourself.")
-        root.addWidget(self.auto_perm_chk)
+        ab.addWidget(self.auto_choose_chk)
 
         warn = QLabel(
-            "⚠ The first one decides things — which option, and whether a "
-            "plan starts running. The second only says yes to work already "
-            "asked for.")
+            "⚠ Permission answers only say yes to work already asked for. "
+            "Chooser answers decide things — which option, and whether a "
+            "plan starts running.")
         warn.setWordWrap(True)
         warn.setStyleSheet("font-weight: bold;")
-        root.addWidget(warn)
+        ab.addWidget(warn)
+        root.addWidget(ans_box)
+
+        # Group 2: scrolled-up windows. The explanation wraps on its own
+        # line: a long label beside the spin box set the dialog's minimum
+        # width past what it may open at (test_fable Z2 caught it).
+        sb_box = QGroupBox("Scrolled-up windows")
+        sbl = QVBoxLayout(sb_box)
+        sb_text = QLabel(
+            "A window you scroll up in is skipped — its live bottom is not "
+            "on screen. Jump it back to the bottom after:")
+        sb_text.setWordWrap(True)
+        sbl.addWidget(sb_text)
+        sb_row = QHBoxLayout()
+        self.scroll_back_spin = QSpinBox()
+        self.scroll_back_spin.setRange(0, 1440)
+        self.scroll_back_spin.setSuffix(" min")
+        self.scroll_back_spin.setSpecialValueText("never")
+        self.scroll_back_spin.setValue(
+            int(auto.get("scroll_back_min", DEFAULT_SCROLL_BACK_MIN)))
+        self.scroll_back_spin.setToolTip(
+            "A window you scrolled up in cannot be read, so it is skipped. "
+            "Left that way it would be skipped for good. After this long it "
+            "gets Ctrl+End (Claude Code's jump-to-bottom) and is watched "
+            "again. Only the view moves; nothing is typed. 0 = never.")
+        sb_row.addWidget(self.scroll_back_spin)
+        sb_row.addStretch(1)
+        sbl.addLayout(sb_row)
+        root.addWidget(sb_box)
         root.addStretch(1)
 
     def result_auto(self) -> dict:
         return {"choose": self.auto_choose_chk.isChecked(),
-                "permission": self.auto_perm_chk.isChecked()}
+                "permission": self.auto_perm_chk.isChecked(),
+                "scroll_back_min": self.scroll_back_spin.value()}
 
     def result_api(self) -> dict:
         return {"enabled": self.api_chk.isChecked(),
@@ -6905,6 +7494,39 @@ class AdvancedDialog(QDialog):
 # ===========================================================================
 
 def main() -> int:
+    if "--selftest" in sys.argv:
+        os.environ["QT_QPA_PLATFORM"] = "offscreen"
+        profile = os.environ.get("AUTO_CONTINUE_SETTINGS_FILE")
+        if not profile:
+            # An isolated profile beside this copy; never change the user's settings.
+            base = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
+            profile = str(base / "selftest-settings.ini")
+            os.environ["AUTO_CONTINUE_SETTINGS_FILE"] = profile
+        if not os.environ.get('AUTO_CONTINUE_DISCOVERY_FILE'):
+            os.environ['AUTO_CONTINUE_DISCOVERY_FILE'] = str(Path(profile).with_suffix('.selftest-api.json'))
+        store = QSettings(profile, QSettings.Format.IniFormat)
+        store.setValue("autostart", False)
+        store.setValue("local_api/enabled", False)
+        store.setValue("desktop/thread", "")
+        store.sync()
+        app = QApplication(sys.argv)
+        app.setQuitOnLastWindowClosed(False)
+        class TestWindow(MainWindow):
+            def _build_updater(self):
+                self.updater_thread = QThread(self)
+        try:
+            win = TestWindow()
+            def finish():
+                win.close()
+                base = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
+                (base / "selftest.log").write_text("selftest ok: Claude / Codex CLI / Desktop\n", encoding="utf-8")
+                app.quit()
+            QTimer.singleShot(1000, finish)
+            return app.exec()
+        except Exception as exc:
+            base = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
+            (base / "selftest.log").write_text(f"selftest FAILED: {exc!r}\n", encoding="utf-8")
+            return 2
     app = QApplication(sys.argv)
     app.setApplicationName("Auto-Continue")
     app.setOrganizationName("auto_continue")

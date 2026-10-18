@@ -2252,6 +2252,27 @@ check("QZ11 in scope, the live wording triggers the switch to the fallback",
 check("QZ12 and no 'not set up' line is written for it",
       not any("not set up for this window" in m for _, m in _lz))
 
+# =============================================================================
+print("---- HD: a recovery line waits for a draft to go ----")
+# A recovery step typed onto a half-typed draft is submitted WITH it, as one
+# message (2026-09-27, the same hole the network and limit paths had).
+reset([(1, "claude")], {1: NOTICE + "\n>" + chr(0xa0) + "half a thought"})
+w = new_watcher(steps="/model opus\ncontinue")
+_hl = []
+w.log.connect(lambda k, m: _hl.append(m))
+for _ in range(3):
+    w._tick()
+    advance(20)
+check("HD1 nothing is typed while the draft is there", texts_sent() == [])
+check("HD2 and the hold is said once",
+      sum("holding '/model opus'" in m for m in _hl) == 1)
+TEXTS[1] = NOTICE + "\n>" + chr(0xa0)
+for _ in range(3):
+    w._tick()
+    advance(20)
+check("HD3 once the box is clear the recovery carries on",
+      texts_sent()[:1] == [["/model opus"]])
+
 print()
 print("RESULT:", "ALL OK" if not failures else f"{failures} FAILURE(S)")
 sys.exit(1 if failures else 0)

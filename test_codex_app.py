@@ -60,6 +60,141 @@ def native_task_quota():
     return window, native
 
 class DesktopScreens(unittest.TestCase):
+    def test_observed_261013_composer_label_is_empty_but_real_draft_still_holds(self):
+        window = replay('idle')
+        composer = next(c for c in app.walk(window.control) if c.ControlTypeName == 'EditControl')
+        composer.Name = composer.value = '和 Codex 一起工作'
+        view = app.read_text(window)
+        self.assertTrue(view.screen.identified and view.screen.ready)
+        self.assertFalse(view.screen.draft)
+        composer.value = 'UNSENT_CUSTOMER_DRAFT'
+        self.assertTrue(app.read_text(window).screen.draft)
+
+    def test_a_slow_invalid_snapshot_still_gets_one_fresh_read_before_input(self):
+        import native_control
+        for reader in ('send_ready','native_action'):
+            with self.subTest(reader=reader):
+                window=replay('idle');view=app.read_text(window)
+                app.prepare(window,view.identity)
+                clock=[0];calls=[]
+                def read(_):
+                    calls.append(True)
+                    if len(calls)==1:
+                        clock[0]+=2
+                        return None
+                    return view
+                with patch.object(app,'read_text',side_effect=read),patch.object(app.time,'monotonic',side_effect=lambda:clock[0]),patch.object(app.time,'sleep'):
+                    observed=app._ready_stable(window,view.identity) if reader=='send_ready' else native_control._read_stable(window)
+                self.assertIs(observed,view)
+                self.assertEqual(len(calls),2)
+
+    def test_streamed_word_nodes_cannot_hide_native_stop_or_change_identity(self):
+        window=replay('idle')
+        original=app.read_text(window)
+        captured=json.loads((FIXTURES/'native_word_list_component.json').read_text(encoding='utf-8'))
+        word=captured['children'][0]
+        captured['children']=[dict(word,runtime=[1,20000+i]) for i in range(13000)]
+        rendered=Node(captured,window.control)
+        window.control.children.insert(0,rendered)
+        original.send.Name='停止'
+        with self.assertRaises(RuntimeError):list(app.walk(window.control))
+        updated=app.read_text(window)
+        self.assertIsNotNone(updated)
+        self.assertEqual(updated.identity,original.identity)
+        self.assertEqual(updated.thread_hint,original.thread_hint)
+        self.assertTrue(updated.screen.running)
+        self.assertFalse(app.send_prompt(window,'continue',dry_run=True))
+        import native_control
+        self.assertIn(original.send,native_control.document(window))
+
+    def test_renderer_compaction_preserves_interactive_children_and_unknown_bounds(self):
+        captured=json.loads((FIXTURES/'native_word_list_component.json').read_text(encoding='utf-8'))
+        button=dict(kind='ButtonControl',name='拒绝',id='',enabled=True,offscreen=False,
+                    runtime=[1,999],value=None,children=[])
+        captured['children'].append(button)
+        rendered=Node(captured)
+        self.assertTrue(any(c.Name=='拒绝' for c in app.control_nodes(rendered)))
+        captured['class']='unknown-container'
+        word=captured['children'][0]
+        captured['children']=[dict(word,runtime=[1,20000+i]) for i in range(13000)]
+        with self.assertRaises(RuntimeError):list(app.control_nodes(Node(captured)))
+
+    def test_captured_stop_summary_does_not_hold_the_next_explicit_send(self):
+        captured = json.loads((FIXTURES / 'native_stopped_component.json').read_text(encoding='utf-8'))
+        self.assertTrue(captured['observed_after_actual_watch_stop'])
+        def leaf(kind, name):
+            return Node(dict(kind=kind, name=name, id='', enabled=True, offscreen=False,
+                             runtime=[1], value=None, children=[]))
+        nodes = [leaf('TextControl', '你说：'), leaf('TextControl', 'CONTROL_NATIVE_STOP'),
+                 leaf('ButtonControl', '复制消息'), Node(captured),
+                 leaf('TextControl', '最新一条回复'), leaf('EditControl', '')]
+        self.assertEqual(app._native_error(nodes), '')
+        nodes.insert(4, leaf('TextControl', 'Sign in to continue'))
+        self.assertIn('Sign in to continue', app._native_error(nodes))
+        nodes.insert(4, leaf('TextControl', 'Stream disconnected unexpectedly'))
+        self.assertEqual(app._native_error(nodes), 'Stream disconnected unexpectedly')
+
+    def test_minimized_native_window_is_unreadable_even_with_stale_visible_uia(self):
+        window = replay('idle')
+        window.control.NativeWindowHandle = window.hwnd
+        user = SimpleNamespace(IsIconic=lambda _:True, IsWindowVisible=lambda _:True)
+        with patch.object(app.ctypes, 'windll', SimpleNamespace(user32=user), create=True):
+            self.assertIsNone(app.read_text(window))
+
+    def test_native_buttons_without_patterns_never_click_another_foreground_window(self):
+        clicks = []
+        control = SimpleNamespace(IsEnabled=True, IsOffscreen=False, Click=lambda:clicks.append(True))
+        self.assertFalse(app._act(control))
+        self.assertEqual(clicks, [])
+
+    def test_real_native_request_card_replaces_composer_and_preserves_full_options(self):
+        import native_control
+        window = replay('question_request_20261005')
+        view = app.read_text(window)
+        self.assertTrue(view.identity and view.thread_hint and view.screen.identified)
+        self.assertTrue(view.screen.blocked)
+        self.assertIsNone(view.composer)
+        self.assertIsNotNone(view.question_card)
+        value = native_control.public_prompt(native_control.prompt(window))
+        self.assertEqual(value['kind'], 'ask')
+        self.assertEqual(value['text'], 'Choose an isolated test option')
+        self.assertEqual([o['label'] for o in value['options']], ['First answer', 'Second complete answer', '语音回答'])
+        self.assertTrue(value['options'][2]['input'])
+
+    def test_native_request_card_is_rejected_in_chatgpt_mode(self):
+        window = replay('question_request_20261005')
+        mode = next(c for c in app.walk(window.control) if '当前模式：Codex' in c.Name)
+        mode.Name = mode.Name.replace('Codex', 'ChatGPT')
+        self.assertFalse(app.read_text(window).screen.identified)
+
+    def test_observed_plan_composer_placeholder_is_empty_and_keeps_identity(self):
+        window = replay('idle')
+        before = app.read_text(window)
+        before.composer.Name = '描述你的任务以生成套餐…'
+        before.composer.value = '描述你的任务以生成套餐…'
+        planned = app.read_text(window)
+        self.assertEqual(planned.identity, before.identity)
+        self.assertTrue(planned.screen.identified)
+        self.assertFalse(planned.screen.blocked)
+
+    def test_observed_collaboration_composer_preserves_identity_and_draft_guard(self):
+        # OpenAI.Codex 26.1007.9446.0, isolated native window, 2026-10-17.
+        # UIA exposes the empty ValuePattern as this placeholder plus a newline.
+        window = replay('idle')
+        before = app.read_text(window)
+        before.composer.Name = '与 Codex 协作'
+        before.composer.value = '与 Codex 协作\n'
+        observed = app.read_text(window)
+        self.assertEqual(observed.identity, before.identity)
+        self.assertEqual(observed.thread_hint, before.thread_hint)
+        self.assertFalse(observed.screen.blocked)
+        self.assertFalse(observed.screen.draft)
+        before.composer.value = 'customer unsent draft'
+        self.assertTrue(app.read_text(window).screen.draft)
+        mode = next(c for c in app.walk(window.control) if '当前模式：Codex' in c.Name)
+        mode.Name = mode.Name.replace('Codex', 'ChatGPT')
+        self.assertFalse(app.read_text(window).screen.identified)
+
     def test_non_codex_page_without_composer_does_not_enter_monitor_list(self):
         window = replay('onboarding_20261004')
         view = app.read_text(window)
@@ -116,6 +251,29 @@ class DesktopScreens(unittest.TestCase):
         self.assertFalse(view.screen.running or view.screen.draft or view.screen.blocked)
         self.assertEqual(view.screen.error_kind, '')
         self.assertTrue(view.screen.completion_id)
+
+    def test_native_action_buttons_outside_old_composer_ancestors_are_read(self):
+        window = replay('idle')
+        original = app.read_text(window).send
+        original.parent.children.remove(original)
+        data = dict(kind='ButtonControl', name='停止', id='', enabled=True, offscreen=False,
+                    runtime=[1, 991], value=None, children=[], **{'class':'size-token-button-composer cursor-interaction'})
+        native = Node(data, window.control)
+        window.control.children.append(native)
+        view = app.read_text(window)
+        self.assertTrue(view.screen.running)
+        self.assertFalse(app.send_prompt(window, 'continue', dry_run=True))
+        native.Name = '发送'
+        view = app.read_text(window)
+        self.assertFalse(view.screen.running)
+        self.assertIs(view.send, native)
+
+    def test_prose_button_named_stop_does_not_claim_native_running_state(self):
+        window = replay('idle')
+        data = dict(kind='ButtonControl', name='停止', id='', enabled=True, offscreen=False,
+                    runtime=[1, 992], value=None, children=[], **{'class':'ordinary-assistant-button'})
+        window.control.children.append(Node(data, window.control))
+        self.assertFalse(app.read_text(window).screen.running)
 
     def test_long_conversation_keeps_the_native_composer_readable(self):
         window = replay('idle')
@@ -223,6 +381,13 @@ class DesktopScreens(unittest.TestCase):
         self.assertEqual(pending.thread_hint, approved.thread_hint)
         self.assertFalse(approved.screen.permission)
         self.assertEqual(approved.permission_mode, 'ask-for-approval')
+
+    def test_current_real_terminal_approval_keeps_the_exact_native_binding(self):
+        view = app.read_text(replay('permission_terminal_20261005'))
+        self.assertTrue(view.screen.permission and view.screen.blocked)
+        self.assertIsNotNone(view.approval_button)
+        self.assertEqual(view.identity, 'ccb7479dc920a07893d50c7bb08b0677b59f5dd1847d03a31a9bc56f6e93fe84')
+        self.assertEqual(view.thread_hint, 'd42b7c971d29745138de6176e5595acc21784aaccbf7206b0a9ffac80376ff63')
 
     def test_permission_card_requires_native_structure_and_visible_once_only_button(self):
         for change in ('offscreen', 'structure'):

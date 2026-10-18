@@ -1,5 +1,9 @@
 # Codex/CC Auto-Continue
 
+## Local Control API revision 1
+
+Version 3.1.0 includes the Codex companion API for Codex Claude Control: sessions, typed actions, operation results, context and SSE. The CLI backend and native driver are maintained here and mirrored into Control with a SHA-256 manifest. A 60-second per-provider/thread lease suspends automatic approvals and permission-mode changes while retaining configured recovery and follow-ups. Confirmed follow-ups consume the budget once; uncertain writes pause the target. Bundled copies update with the full Control package. This release includes the Control integration. Validation covers the source regressions and the packaged local API; complete Control-client acceptance is tracked separately.
+
 A Windows GUI watchdog for [Claude Code](https://github.com/anthropics/claude-code), Codex CLI in Windows Terminal, and the Codex desktop App. Select any combination of Codex EXE, Codex CLI and Claude CLI; switch their settings with three equal tabs. Each driver has independent detection, state, retries and configuration.
 
 It resumes recoverable failures and can send a configured follow-up after a completed turn. Claude retains its existing behavior. Codex model and reasoning settings use the actual session's native controls.
@@ -24,7 +28,7 @@ Prefer source? See [Install](#install) below.
 - Each Codex **Advanced** dialog offers **Full access** (default), **Approve for me** or **Ask for approval**, plus **Automatically approve tool permissions** (default on). Turning automatic approval off holds a pending permission card. Approval does not answer ordinary choosers, model dialogs or login prompts. CLI and EXE settings are separate.
 - Native quota messages after commentary/tool output are recognised. During native internal retries, automatic input is held. Historical errors and quoted error text do not schedule retries. CLI waits for its parsed reset deadline plus Buffer; App quota messages without a deadline use bounded Retry attempts instead.
 - The App retains its own staged follow-up while native Send is unavailable and confirms a submitted user message before consuming retry or after-finish budgets. Editing the draft, changing conversations, Skip or Exclude cancels the pending send.
-- After-finish budgets are saved after a confirmed submission; zero prevents further follow-ups. Drafts, active turns, unreadable UI and unknown terminal identity hold input. Authentication, billing and unrecognised native errors require attention. The companion API retains its Claude-only scope.
+- After-finish budgets are saved after a confirmed submission; zero prevents further follow-ups. Drafts, active turns, unreadable UI and unknown terminal identity hold input. Authentication, billing and unrecognised native errors require attention. The companion API now exposes separate Codex session routes; reading conversation contents still requires the separate opt-in switch.
 - Native verification used Codex CLI **0.160.0** and Codex App **26.930.3930.0** with its **0.160.0** runtime, isolated test homes and loopback fault injection: 13 CLI scenarios, seven App scenarios and three permission modes per driver. The source regression suite contains **122 checks**. See [verification details](docs/validation/codex-3.0.0.md) for methods and limits.
 
 The following sections describe the existing Claude watcher.

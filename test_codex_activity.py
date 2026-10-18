@@ -43,7 +43,7 @@ class ActivityChecks(unittest.TestCase):
             for kind in events:
                 file.write(json.dumps({'timestamp': '2026-10-04T04:00:00Z', 'type': 'event_msg',
                                        'payload': {'type': kind}}) + '\n')
-        self.db.execute('INSERT INTO threads VALUES (?,?,?,?,?,?,?,?,?,?,?)',
+        self.db.execute('INSERT INTO threads (id,title,cwd,rollout_path,source,updated_at,updated_at_ms,recency_at_ms,archived,originator,thread_source) VALUES (?,?,?,?,?,?,?,?,?,?,?)',
                         (ident, 'Same title', 'project/' + ident, str(path), source, updated,
                          updated * 1000, recent, archived, origin, thread_source))
         self.db.commit()
@@ -55,6 +55,31 @@ class ActivityChecks(unittest.TestCase):
         db.execute('CREATE TABLE thread_turns (thread_id TEXT, status TEXT, error_json TEXT, '
                    'started_at INTEGER, completed_at INTEGER, rollout_ordinal INTEGER)')
         return db
+
+    def test_exact_completed_turn_uses_latest_structured_event(self):
+        path = self.add('desktop', 1)
+        header = dict(type='session_meta', payload=dict(id='desktop', originator='Codex Desktop'))
+        def write(events, partial=''):
+            values = [header] + [dict(type='event_msg', ordinal=i+1, payload=dict(type=kind, turn_id=tid))
+                                for i,(kind,tid) in enumerate(events)]
+            path.write_text(''.join(json.dumps(v)+'\n' for v in values)+partial, encoding='utf-8')
+        write([('task_complete','old'),('task_started','new')])
+        self.assertEqual(self.reader.completed_turn('desktop'), '')
+        write([('task_complete','old'),('task_started','new'),('task_complete','new')])
+        self.assertEqual(self.reader.completed_turn('desktop'), 'rollout:desktop:new')
+        for ending in ('turn_aborted','turn_failed','error'):
+            write([('task_complete','old'),(ending,'new')])
+            self.assertEqual(self.reader.completed_turn('desktop'), '')
+        write([('task_started','new')], json.dumps(dict(type='event_msg',payload=dict(type='task_complete',turn_id='new'))))
+        self.assertEqual(self.reader.completed_turn('desktop'), '')
+
+    def test_completed_turn_rejects_wrong_metadata_and_other_clients(self):
+        self.add('cli', 1, source='cli', events=('task_complete',))
+        path = self.add('desktop', 2, events=('task_complete',))
+        path.write_text(json.dumps(dict(type='session_meta',payload=dict(id='another'))) + '\n' +
+            json.dumps(dict(type='event_msg',ordinal=1,payload=dict(type='task_complete'))) + '\n',encoding='utf-8')
+        self.assertEqual(self.reader.completed_turn('desktop'), '')
+        self.assertEqual(self.reader.completed_turn('cli'), '')
 
     def test_default_five_and_custom_limit_follow_sidebar_recency(self):
         for i in range(8):
@@ -94,6 +119,35 @@ class ActivityChecks(unittest.TestCase):
         self.db.execute("UPDATE threads SET originator=NULL WHERE id='older'")
         self.db.commit()
         self.assertEqual(self.reader.read()[0][0]['thread_id'], 'older')
+
+    def test_app_created_codex_chat_uses_its_explicit_name(self):
+        self.add('created', 10, thread_source='agent_created_thread', events=('task_complete',))
+        self.add('hidden', 20, thread_source='subagent')
+        self.add('work', 30, thread_source='agent_created_thread', origin='ChatGPT Work')
+        self.db.execute('ALTER TABLE threads ADD COLUMN name TEXT')
+        self.db.execute("UPDATE threads SET title='',name='debugcodex' WHERE id='created'")
+        self.db.commit()
+        self.assertEqual(self.reader.thread_id_for_title('debugcodex'), 'created')
+        self.assertEqual(self.reader.thread('created')['title'], 'debugcodex')
+        self.assertEqual([(r['thread_id'],r['title']) for r in self.reader.read()[0]], [('created','debugcodex')])
+        self.assertIsNone(self.reader.thread('hidden'))
+        self.assertIsNone(self.reader.thread('work'))
+
+    def test_explicit_names_override_old_titles_and_detect_ambiguity(self):
+        self.add('one', 1)
+        self.add('two', 2)
+        self.db.execute('ALTER TABLE threads ADD COLUMN name TEXT')
+        self.db.execute("UPDATE threads SET name='First explicit name' WHERE id='one'")
+        self.db.execute("UPDATE threads SET name='Second explicit name' WHERE id='two'")
+        self.db.commit()
+        self.assertEqual(self.reader.thread_id_for_title('Same title'), '')
+        self.assertEqual(self.reader.thread_id_for_title('First explicit name'), 'one')
+        self.db.execute("UPDATE threads SET name='First explicit name' WHERE id='two'")
+        self.db.commit()
+        self.assertEqual(self.reader.thread_id_for_title('First explicit name'), '')
+        self.db.execute("UPDATE threads SET name='' WHERE id='two'")
+        self.db.commit()
+        self.assertEqual(self.reader.thread_id_for_title('Same title'), 'two')
 
     def test_chatgpt_and_work_sources_never_fill_recent_codex_limit(self):
         self.add('chatgpt', 999, source='desktop', origin='ChatGPT')

@@ -2,12 +2,13 @@
 """PyInstaller spec for the Auto-Continue GUI watchdog.
 
 Build:
-    python build_release.py
+    pyinstaller Auto-Continue.spec --clean --noconfirm
 
 Output:
     dist/Auto-Continue.exe   (single-file, no console, no deps)
 """
 from PyInstaller.utils.hooks import collect_data_files
+from pathlib import Path
 
 # uiautomation ships a `bin/` folder with the native UIAutomationCore shim;
 # PyInstaller must copy it next to the bundled module.
@@ -82,7 +83,8 @@ a = Analysis(
 _DROP_BIN = ("opengl32sw", "qt6pdf", "qpdf", "qt6network",
              "qt6qml", "qt6quick", "qt6virtualkeyboard")
 a.binaries = [b for b in a.binaries
-              if not any(k in b[0].lower() for k in _DROP_BIN)]
+              if not any(k in b[0].lower() for k in _DROP_BIN)
+              and Path(b[0]).name.lower() not in ("icuuc.dll", "icudt78.dll")]
 a.datas = [d for d in a.datas
            if "translations" not in d[0].lower().replace("\\", "/")]
 

@@ -19,6 +19,7 @@ Plain harness like the others: exits non-zero on any failure.
 import io
 import os
 import sys
+import subprocess
 
 sys.stdout.reconfigure(encoding="utf-8")
 
@@ -50,6 +51,19 @@ DETECTORS = [
 
 
 def tracked_files():
+    # Dependency environments and archived builds are not source files.
+    # Respect the repository's own tracked/unignored file boundary.
+    try:
+        result = subprocess.run(['git', 'ls-files', '-z', '--cached', '--others',
+                                 '--exclude-standard'], cwd=ROOT, capture_output=True,
+                                timeout=15, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+        if result.returncode == 0:
+            for relative in sorted(set(result.stdout.decode('utf-8').split('\0'))):
+                if relative and relative.endswith(EXTS) and not set(relative.split('/')) & SKIP_DIRS:
+                    yield os.path.join(ROOT, relative)
+            return
+    except (OSError, subprocess.TimeoutExpired):
+        pass
     for dirpath, dirnames, filenames in os.walk(ROOT):
         dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
         for fn in filenames:

@@ -42,7 +42,7 @@ import uiautomation as auto
 # A "-dev" suffix does not help: parse_version() strips it, so 1.0.17-dev and
 # 1.0.17 compare equal. Leave this at the LAST RELEASED version while
 # developing; release.yml refuses to publish if it disagrees with the tag.
-APP_VERSION = "3.0.0"
+APP_VERSION = "3.1.0"
 
 
 # ---------------------------------------------------------------------------
@@ -136,6 +136,14 @@ ECONNRESET_RE = re.compile(
     r"API\s+Error:\s*(?:"
     r"Unable\s+to\s+connect\s+to\s+API\s*"
     r"\(\s*(?:E[A-Z0-9_]{2,}|UND_ERR_[A-Z_]+)\s*\)"
+    # Any OTHER wording that carries an errno. Reported 2026-09-24: a
+    # session ended its turn on "API Err·or: Connection dropped (ECONN·RESET)"
+    # and sat idle for hours, because only "Unable to connect" was listed.
+    # The prose around the code keeps changing (this is the third rewording
+    # of the same condition in two weeks); the errno in parentheses is the
+    # part that does not. Case-sensitive on the code itself, so an ordinary
+    # parenthesised word — "(Enter)", "(Error)" — is not mistaken for one.
+    r"|[^\n]{0,80}?\(\s*(?-i:E[A-Z0-9]{2,}[A-Z0-9_]*|UND_ERR_[A-Z_]+)\s*\)"
     r"|fetch\s+failed"
     # Reported live 2026-09-13: a session sat at its prompt behind two of
     # these and nothing ever poked it, because none of the wordings above
@@ -224,8 +232,68 @@ SCAN_TAIL_CHARS = 10000
 # ---------------------------------------------------------------------------
 
 
+def _cascadia_hwnds() -> list:
+    """Visible top-level Windows Terminal windows, from the OS, in Z order.
+
+    Plain Win32, no UI Automation: EnumWindows plus a class-name check stays
+    in this process and took 1-5 ms for the whole desktop (2026-09-27).
+    """
+    u32 = ctypes.windll.user32
+    found = []
+    buf = ctypes.create_unicode_buffer(256)
+    proto = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+    def _cb(hwnd, _lparam):
+        try:
+            u32.GetClassNameW(hwnd, buf, 256)
+            if (buf.value == "CASCADIA_HOSTING_WINDOW_CLASS"
+                    and u32.IsWindowVisible(hwnd)):
+                found.append(int(hwnd))
+        except Exception:
+            pass
+        return True
+
+    if not u32.EnumWindows(proto(_cb), 0):
+        raise OSError("EnumWindows failed")
+    return found
+
+
 def find_terminal_windows():
     """Return list of WindowControl for Windows Terminal top-level windows.
+
+    The OS says which windows exist and UI Automation is asked about those
+    alone, one handle each. Until 2.1.4 UIA listed the whole desktop
+    (GetRootControl().GetChildren()), which asks every top-level window's
+    owner in turn: one slow program made each pass wait 0.75-9 s
+    (2026-09-27), the local API timed out behind it, and now and then it
+    came back EMPTY while every terminal was open, the source of the
+    'missing from this pass' warnings. Same set of windows either way:
+    visible top-level windows of Windows Terminal's class.
+
+    The old listing stays as the fallback, for when the OS listing fails or
+    finds nothing to wrap.
+    """
+    try:
+        hwnds = _cascadia_hwnds()
+    except Exception:
+        hwnds = []
+    out = []
+    for h in hwnds:
+        try:
+            c = auto.ControlFromHandle(h)
+        except Exception:
+            c = None
+        # A handle UIA cannot wrap this instant is left out of the pass, as a
+        # flaky window always was; the watcher keeps its state (IsWindow).
+        if c is not None:
+            out.append(c)
+    if out:
+        return out
+    return _find_terminal_windows_uia()
+
+
+def _find_terminal_windows_uia():
+    """The pre-2.1.4 listing: every top-level window, via UIA.
 
     Every UIA access is guarded: a flaky child window that raises a COMError
     (e.g. EVENT_E_ALL_SUBSCRIBERS_FAILED) is skipped rather than aborting the
@@ -245,6 +313,39 @@ def find_terminal_windows():
         if "CASCADIA" in cls.upper():
             out.append(w)
     return out
+
+
+def terminal_window_from_handle(hwnd):
+    """The Windows Terminal window with this handle, or None.
+
+    For a caller that already knows which window it wants. Listing the
+    desktop to find it, as find_terminal_windows does, asks every top-level
+    window on the machine, and one slow app makes that take seconds: 0.75,
+    5.6, 9.0 and 3.8 s for 17 windows, measured 2026-09-27, while asking the
+    one window directly took about 2 ms. The local API paid that on every
+    call, on top of waiting for the pass, and a caller timed out on it.
+
+    Same answer set as the listing: a visible top-level terminal window.
+    Anything else, including a closed or hidden window, is None.
+    """
+    try:
+        h = int(hwnd)
+        if not h:
+            return None
+        u32 = ctypes.windll.user32
+        hv = ctypes.c_void_p(h)
+        if not u32.IsWindow(hv) or not u32.IsWindowVisible(hv):
+            return None
+        buf = ctypes.create_unicode_buffer(256)
+        u32.GetClassNameW(hv, buf, 256)
+        if "CASCADIA" not in buf.value.upper():
+            return None
+        ctrl = auto.ControlFromHandle(h)
+        if ctrl is None or "CASCADIA" not in (ctrl.ClassName or "").upper():
+            return None
+        return ctrl
+    except Exception:
+        return None
 
 
 def init_uia_thread() -> None:
@@ -475,6 +576,16 @@ RUNNING_RE = re.compile(
     # a due limit 'continue' could land, and the API told companions the
     # window was idle — all into a request that was still in flight.
     r"|·\s*retrying\b[^\n]{0,80}?\bwaiting\s+up\s+to\s+\d+\s*[hms]"
+    # The spinner line by its SHAPE, not its timer: a spinner glyph, a verb,
+    # an ellipsis. Captured live 2026-09-25 while a turn waited for its first
+    # byte, the timer had no "·" after it — "✽ Effecting… (1m 51s)" — and in
+    # a turn's first seconds there is no timer at all — "✶ Effecting…". Both
+    # read as idle, so a session waiting on a slow API was taken for one stuck
+    # on its PREVIOUS error and got 'continue' typed into its queue every
+    # retry interval. A finished turn prints "✻ Crunched for 18m 51s · done"
+    # — no ellipsis — so it is not mistaken for one still running.
+    r"|^[ \t]*[·✢✳✶✻✽][ \t]+[^\s…]+(?:[ \t][^\s…]+){0,2}…",
+    re.MULTILINE,
 )
 
 
@@ -501,6 +612,30 @@ def session_running_after(text: str, pos: int) -> bool:
     that way.
     """
     return RUNNING_RE.search(text, pos) is not None
+
+
+# A prompt the session was given, echoed into its transcript, and a turn-end
+# stamp ("✻ Cogitated for 29s · done 10:53") somewhere below it.
+_PROMPT_ECHO_RE = re.compile(r"^[ \t]*[>❯][ \t ]+\S", re.MULTILINE)
+_TURN_DONE_RE = re.compile(r"·\s*done\s+\d{1,2}:\d{2}")
+
+
+def turn_completed_after(text: str, pos: int) -> bool:
+    """True if a WHOLE turn has run since offset `pos`: a prompt, then its end.
+
+    Recovery used to need the session caught mid-turn by a pass. A session that
+    is only waiting on background work answers a 'continue' in seconds — "still
+    at gate 1, I'll be told when the chain ends" — and that turn can start and
+    finish between two passes. Seen 2026-09-25: the error stayed the last
+    thing the tool believed about the window, and ten minutes later it was
+    poked again for nothing. A prompt followed by a "· done HH:MM" below the
+    error is a turn that has happened since; the error is history.
+
+    The done-stamp directly under the error does NOT count — that belongs to
+    the turn the error ended — which is why the prompt has to come first.
+    """
+    p = _PROMPT_ECHO_RE.search(text, pos)
+    return bool(p and _TURN_DONE_RE.search(text, p.end()))
 
 
 # Claude Code stamps every safeguard block with its own request id, a few
@@ -628,7 +763,8 @@ def parse_retry_exhausted(text: str, pattern=None) -> bool:
     m = matches[-1]
     if len(text) - m.end() > NETWORK_POST_MATCH_TAIL:
         return False
-    if session_running_after(text, m.end()):
+    if (session_running_after(text, m.end())
+            or turn_completed_after(text, m.end())):
         return False
     try:
         n, total = int(m.group(1)), int(m.group(2))
@@ -658,7 +794,8 @@ def parse_econnreset_stuck(text: str, pattern=None) -> bool:
     m = matches[-1]
     if len(text) - m.end() > NETWORK_POST_MATCH_TAIL:
         return False
-    if session_running_after(text, m.end()):
+    if (session_running_after(text, m.end())
+            or turn_completed_after(text, m.end())):
         return False
     return True
 
@@ -684,7 +821,8 @@ def parse_server_error_stuck(text: str, pattern=None) -> bool:
     m = matches[-1]
     if len(text) - m.end() > NETWORK_POST_MATCH_TAIL:
         return False
-    if session_running_after(text, m.end()):
+    if (session_running_after(text, m.end())
+            or turn_completed_after(text, m.end())):
         return False
     return True
 
@@ -703,8 +841,13 @@ def parse_server_error_stuck(text: str, pattern=None) -> bool:
 # family and version ("Fable 5's", "Opus 6's", something not invented yet).
 # The `\s+` runs also keep this source from matching itself in a watched
 # terminal, which is why they must survive any edit here.
+# The version group takes whitespace only in front of a digit. Written as
+# `\s*[\d.]*\s*` it let three whitespace runs share every blank after a
+# word, and Claude Code pads each line to the window width, so a mostly
+# empty screen cost O(n^2): 5.6 s for one 3.6 KB tail, holding the GIL, once
+# a pass (2026-09-27, found as a 10 s stall in every pass).
 DEFAULT_FABLE_PATTERN = (
-    r"\b\w[\w.]{1,20}\s*[\d.]*\s*[’']?s?\s+safeguards\s+flagged"
+    r"\b\w[\w.]{1,20}(?:\s{0,3}[\d.]+)?[’']?s?\s+safeguards\s+flagged"
     r"|can[’']?t\s+respond\s+to\s+this\s+request\s+with\s+\w[\w.]{1,20}"
 )
 FABLE_REFUSAL_RE = re.compile(DEFAULT_FABLE_PATTERN, re.IGNORECASE)
@@ -1051,6 +1194,60 @@ def _chooser_match(text: str, pattern=None):
     return m
 
 
+# The same option list with its cursor on ANY row. The arrow keys move the
+# cursor, and so does picking a typed-answer row, so a chooser someone has
+# touched no longer starts at the cursor on 1. Used only to HOLD this tool's
+# own typing, never to answer: Enter answers whichever row the cursor is on,
+# which is exactly why auto-answer stays on CHOOSER_RE (cursor on 1).
+_CURSOR_ANY_RE = re.compile(
+    r"(?m)^" + _ROW + r"[>\u276f][ \t]+\d{1,2}[.)][ \t]+\S")
+_NUMBERED_ROW_RE = re.compile(
+    r"(?m)^" + _ROW + r"(?:[>\u276f][ \t]+)?\d{1,2}[.)][ \t]+\S")
+
+
+def _open_list_match(text: str, chooser_pattern=None):
+    """The open option list's cursor row, wherever the cursor is, or None.
+
+    The same "genuinely showing" rules as the answering parsers (near the
+    tail, not the composer, no composer below it), plus a second numbered
+    row nearby, so that one quoted "> 3. something" line is not a list.
+    """
+    m = _chooser_match(text, chooser_pattern)
+    if m is not None:
+        return m
+    m = _chooser_match(text, _CURSOR_ANY_RE)
+    if m is None:
+        return None
+    lo, hi = max(0, m.start() - 2000), min(len(text), m.end() + 2000)
+    return m if len(_NUMBERED_ROW_RE.findall(text, lo, hi)) >= 2 else None
+
+
+def prompt_open(text: str, chooser_pattern=None) -> bool:
+    """True if an option list is waiting at the bottom, wherever its cursor."""
+    return _open_list_match(text or "", chooser_pattern) is not None
+
+
+def typing_hold_reason(text: str, chooser_pattern=None):
+    """Why this tool must not type a line into this screen now, or None.
+
+    Every line it types ends in Enter. On top of a half-typed draft that
+    submits the draft and the line as one message; into an open prompt the
+    text goes nowhere useful and the Enter picks whatever option is
+    highlighted, which on a permission prompt is "Yes". Measured 2026-09-27
+    in the harness: after-finish, the network retry and the limit resume all
+    did one or the other. Unknown is not a reason to hold: an unreadable or
+    unfamiliar screen types as before, so this cannot silently stop the
+    resume that the tool exists for.
+    """
+    if not text:
+        return None
+    if composer_has_draft(text):
+        return "the input box holds unsent text"
+    if prompt_open(text, chooser_pattern):
+        return "a prompt is open and waiting for an answer"
+    return None
+
+
 def _permission_context(text: str, m) -> str:
     """The text a permission prompt's tells actually live in.
 
@@ -1168,13 +1365,292 @@ def classify_prompt(text: str, chooser_pattern=None, permission_pattern=None,
         kind = "chooser"
         rx = None
     else:
-        return None
+        # The cursor is off the first row: the arrow keys moved it, or a
+        # typed-answer row was picked. Still waiting, so still reported --
+        # a watch lost the prompt the moment someone pressed Down
+        # (2026-09-27). Only reported: answering stays on the parsers above,
+        # which need the cursor on 1, because Enter answers the cursor's row.
+        m = _open_list_match(text, chooser_pattern)
+        if m is None:
+            return None
+        prx = permission_pattern or PERMISSION_RE
+        kind = ("permission" if prx.search(_permission_context(text, m))
+                else "chooser")
+        rx = None
     if rx is None:
-        m = _chooser_match(text, chooser_pattern)
+        m = _open_list_match(text, chooser_pattern)
     else:
         ms = list(rx.finditer(text))
         m = ms[-1] if ms else None
-    return {"kind": kind, "text": _prompt_line(text, m) if m else ""}
+    out = {"kind": kind, "text": _prompt_line(text, m) if m else ""}
+    shape = prompt_structure(text, chooser_pattern)
+    if shape is not None:
+        if shape.get("question"):
+            out["text"] = shape["question"][:PROMPT_TEXT_MAX]
+        out.update(shape)
+    else:
+        out.update({k: None for k in _SHAPE_KEYS})
+    return out
+
+
+# ---------------------------------------------------------------------------
+# The shape of an open prompt, for a companion that redraws it elsewhere
+# ---------------------------------------------------------------------------
+# Read off real Claude Code 2.1.283 screens (cc-remote's S5 spike): the
+# permission prompt, AskUserQuestion with one or several questions, check
+# boxes, a typed-answer row, the preview layout, the review page, and the
+# plan confirmation. Everything is what the SCREEN says, because keys act on
+# the screen; what a prompt is about (a diff, a plan) is the session's, and
+# is not read here. A field that cannot be read is None, never a guess.
+_SHAPE_KEYS = ("sig", "title", "question", "tabs", "tab", "layout",
+               "options", "below", "hint")
+_SEP_SOLID_RE = re.compile(r"^\s*[\u2500\u2501]{10,}\s*$")
+_SEP_DASH_RE = re.compile(r"^\s*[\u254c\u2504\u254d]{10,}\s*$")
+_OPT_ROW_RE = re.compile(
+    r"^(?P<lead>[ \t]{0,6}[\u2502\u2503\u2551|]?[ \t]{0,4})"
+    r"(?P<cur>[>\u276f][ \t]+)?(?P<n>\d{1,2})[.)][ \t]+(?P<rest>\S.*?)\s*$")
+_TAB_TOKEN_RE = re.compile(
+    r"([\u2610\u2612\u2714])\s+([^\u2610\u2612\u2714\u2190\u2192]+?)"
+    r"(?=\s{2,}|\s*[\u2610\u2612\u2714\u2192]|\s*$)")
+_HINT_RE = re.compile(
+    r"Enter\s+to\s+(?:select|confirm)|Esc\s+to\s+cancel|to\s+navigate"
+    r"|Tab\s+to\s+amend|ctrl\+g\s+to\s+edit|to\s+add\s+notes",
+    re.IGNORECASE)
+_CHECK_RE = re.compile(r"^\[([^\]]?)\][ \t]*")
+_PANEL_RE = re.compile(r"\s{2,}[\u250c\u2502\u2514]")
+_INPUT_LABEL_RE = re.compile(
+    r"^(?:type\s+something\.?|tell\s+claude\s+what\s+to\s+change)$",
+    re.IGNORECASE)
+_BOX_STRIP = "\u2502\u2503\u2551| \t"
+
+
+def _tab_bar(line: str):
+    """[{label, done} | {label, submit}] if `line` is a tab bar, else None."""
+    if "\u2610" not in line and "\u2612" not in line:
+        return None
+    toks = _TAB_TOKEN_RE.findall(line)
+    if not toks:
+        return None
+    rest = _TAB_TOKEN_RE.sub("", line)
+    if rest.replace("\u2190", "").replace("\u2192", "").strip():
+        return None                     # other words on the line: not a bar
+    tabs = []
+    for mark, label in toks:
+        label = label.strip()
+        if mark == "\u2714":
+            tabs.append({"label": label, "submit": True})
+        else:
+            tabs.append({"label": label, "done": mark == "\u2612"})
+    return tabs
+
+
+def prompt_structure(text: str, chooser_pattern=None):
+    """The open prompt as data (see _SHAPE_KEYS), or None if none is open."""
+    m = _open_list_match(text or "", chooser_pattern)
+    if m is None:
+        return None
+    lines = text.splitlines()
+    c = text.count("\n", 0, m.start())
+    if c >= len(lines) or not _OPT_ROW_RE.match(lines[c]):
+        return None
+
+    # Up to row 1 of this list.
+    s = c
+    for k in range(c, max(-1, c - 80), -1):
+        ln = lines[k]
+        if _SEP_SOLID_RE.match(ln) or _SEP_DASH_RE.match(ln) or _tab_bar(ln):
+            break
+        om = _OPT_ROW_RE.match(ln)
+        if om and int(om.group("n")) == 1:
+            s = k
+            break
+
+    # Down through the options, to the separator or the hint.
+    options, extra, layout = [], [], "list"
+    i, stop = s, None
+    while i < len(lines):
+        ln = lines[i]
+        if _SEP_SOLID_RE.match(ln):
+            stop = ("sep", i)
+            break
+        om = _OPT_ROW_RE.match(ln)
+        # The footer is the last thing on screen. A hint-like line with a
+        # rule still below it is inside the prompt -- the preview panel's
+        # "Notes: press n to add notes" -- not its footer.
+        if (om is None and _HINT_RE.search(ln) and not any(
+                _SEP_SOLID_RE.match(x) for x in lines[i + 1:])):
+            stop = ("hint", i)
+            break
+        if om is not None:
+            rest = om.group("rest")
+            pm = _PANEL_RE.search(rest)
+            if pm:
+                layout = "preview"
+                rest = rest[:pm.start()].rstrip()
+            col = om.start("rest")
+            check = None
+            cm = _CHECK_RE.match(rest)
+            if cm:
+                check = cm.group(1).strip() != ""
+                col += cm.end()
+                rest = rest[cm.end():]
+            picked = False
+            if rest.endswith("\u2714") and rest[:-1].strip():
+                picked = True
+                rest = rest[:-1].rstrip()
+            options.append({"n": int(om.group("n")), "label": rest.strip(),
+                            "desc": None, "cursor": bool(om.group("cur")),
+                            "check": check, "picked": picked,
+                            "input": False, "_col": col})
+        elif ln.strip() and options and layout == "list":
+            indent = len(ln) - len(ln.lstrip(" \t"))
+            if indent >= options[-1]["_col"]:
+                d = ln.strip()
+                o = options[-1]
+                o["desc"] = d if o["desc"] is None else o["desc"] + "\n" + d
+            else:
+                # An unnumbered action row inside the list (a multi-choice
+                # question's "Submit"): not an option, so it goes with the
+                # other unnumbered rows.
+                extra.append({"n": None, "label": ln.strip(_BOX_STRIP)})
+        i += 1
+
+    below, hint = [], None
+    if stop is not None and stop[0] == "sep":
+        for ln in lines[stop[1] + 1:]:
+            if not ln.strip():
+                continue
+            if _OPT_ROW_RE.match(ln) is None and _HINT_RE.search(ln):
+                hint = ln.strip(_BOX_STRIP)
+                break
+            om = _OPT_ROW_RE.match(ln)
+            if om:
+                below.append({"n": int(om.group("n")),
+                              "label": om.group("rest").strip()})
+            else:
+                below.append({"n": None, "label": ln.strip(_BOX_STRIP)})
+    elif stop is not None:
+        hint = lines[stop[1]].strip(_BOX_STRIP)
+    below = extra + below
+
+    # The question: the line just above row 1.
+    question, qi = None, None
+    for k in range(s - 1, max(-1, s - 4), -1):
+        ln = lines[k]
+        if not ln.strip():
+            continue
+        if not (_SEP_SOLID_RE.match(ln) or _SEP_DASH_RE.match(ln)
+                or _tab_bar(ln)):
+            question, qi = ln.strip(_BOX_STRIP), k
+        break
+
+    # Title and tabs: between the prompt's top rule and the question.
+    title, tabs, review = [], None, False
+    top = qi if qi is not None else s
+    above, b = [], None
+    for k in range(top - 1, max(-1, top - 40), -1):
+        ln = lines[k]
+        if _SEP_SOLID_RE.match(ln):
+            b = k
+            break
+        t = _tab_bar(ln)
+        if t is not None:
+            tabs = t
+            break
+        above.insert(0, ln)
+    body = [ln.strip(_BOX_STRIP) for ln in above]
+    if any(x == "Review your answers" for x in body):
+        review = True
+        at = body.index("Review your answers")
+        title = [x for x in body[at + 1:] if x][:6]
+    else:
+        if not any(x for x in body) and b is not None:
+            # A plan: its text opens with a dashed rule under the title, and
+            # the question's solid rule follows the text -- with a closing
+            # dashed rule first in cc-remote's sample, without one on a live
+            # 2.1.283 screen (the text ran straight into it). Find the
+            # OPENING dashed rule either way; the title sits above it.
+            k = b - 1
+            if k >= 0 and _SEP_DASH_RE.match(lines[k]):
+                k -= 1
+            while (k >= 0 and k > b - 200 and not _SEP_DASH_RE.match(lines[k])
+                   and not _SEP_SOLID_RE.match(lines[k])):
+                k -= 1
+            if k >= 0 and _SEP_DASH_RE.match(lines[k]):
+                up = []
+                for j in range(k - 1, max(-1, k - 8), -1):
+                    if _SEP_SOLID_RE.match(lines[j]):
+                        break
+                    up.insert(0, lines[j].strip(_BOX_STRIP))
+                body = up
+        for x in body:
+            if _SEP_DASH_RE.match(x):
+                if title:
+                    break
+                continue
+            if x:
+                title.append(x[:80])
+        title = title[:3]
+    if tabs is None:
+        # A tab bar above "Review your answers" sits past the title lines.
+        for k in range(top - 1, max(-1, top - 14), -1):
+            if _SEP_SOLID_RE.match(lines[k]):
+                break
+            t = _tab_bar(lines[k])
+            if t is not None:
+                tabs = t
+                break
+
+    # Which tab is showing. The highlight is not in the text, so this is
+    # only said when it can be worked out: the review page is the submit
+    # tab; otherwise the first unanswered question, unless an answered one
+    # is being revisited (its choice carries a trailing check) -- then only
+    # if there is exactly one it can be.
+    tab = None
+    if tabs:
+        idx = list(range(len(tabs)))
+        if review or (question or "").startswith("Ready to submit"):
+            sub = [j for j in idx if tabs[j].get("submit")]
+            tab = sub[0] if sub else None
+        elif any(o["picked"] for o in options):
+            done = [j for j in idx if tabs[j].get("done")]
+            tab = done[0] if len(done) == 1 else None
+        else:
+            todo = [j for j in idx
+                    if not tabs[j].get("submit") and not tabs[j].get("done")]
+            tab = todo[0] if todo else None
+
+    # The typed-answer row.
+    for o in options:
+        if (_INPUT_LABEL_RE.match(o["label"])
+                or "with this feedback" in (o["desc"] or "")):
+            o["input"] = True
+    if options and not any(o["input"] for o in options):
+        if hint and "ctrl+g to edit" in hint.lower() and not any(
+                "plan" in (x or "").lower() for x in title):
+            for o in options:
+                if o["cursor"]:
+                    o["input"] = True
+        elif layout == "list" and any(
+                (x["label"] or "").lower().startswith("chat about this")
+                for x in below):
+            # AskUserQuestion always ends its list with the typed answer;
+            # once something is typed there, the label is that text.
+            options[-1]["input"] = True
+    for o in options:
+        del o["_col"]
+
+    # Question, option labels and the tab row's labels: none of them move
+    # with the cursor, a check box or typing into the answer row. (The tab
+    # INDEX would: it is inferred from the done marks, which a toggle flips.)
+    ident = "\x1f".join(
+        [question or ""]
+        + ["<input>" if o["input"] else o["label"] for o in options]
+        + [t["label"] for t in (tabs or [])])
+    sig = hashlib.sha1(ident.encode("utf-8", "replace")).hexdigest()[:12]
+    return {"sig": sig, "title": title, "question": question, "tabs": tabs,
+            "tab": tab, "layout": layout, "options": options,
+            "below": below, "hint": hint}
 
 
 def composer_has_draft(text: str) -> bool:
@@ -1597,7 +2073,49 @@ def summarize_keyspec(keyspec: str) -> str:
         pos = m.end()
     if pos < len(spec):
         out.append(_chars(len(spec) - pos))
-    return "".join(out)
+    # A run of one key reads as a count: a companion clearing a field with
+    # eighty {Back} wrote all eighty into one log line (2026-09-27). Two
+    # stay as they are -- "{Esc}{Esc}" is clearer than a count.
+    runs = []
+    for tok in out:
+        if runs and runs[-1][0] == tok and tok.startswith("{"):
+            runs[-1][1] += 1
+        else:
+            runs.append([tok, 1])
+    return "".join(t * n if n < 3 else f"{t}×{n}" for t, n in runs)
+
+
+def keyspec_problem(keyspec: str):
+    """The first {...} in a SendKeys spec that cannot be pressed, or None.
+
+    uiautomation only finds out while typing: an unknown name such as
+    {Backspace} (its name is {Back}) is handed on as one "character" and
+    raises there, which send_keys reports as a plain False. The API then
+    answered 'foreground', and a caller that believed it would retry a
+    request that can never work (seen 2026-09-27). Checked before the window
+    is touched, with the same brace scan uiautomation uses.
+    """
+    text = str(keyspec or "")
+    i = 0
+    while i < len(text):
+        if text[i] != "{":
+            i += 1
+            continue
+        r = text.find("}", i)
+        if r == i + 1:                    # "{}}" is a literal "}"
+            r = text.find("}", i + 2)
+        if r == -1:
+            return text[i:]
+        tok = text[i:r + 1]
+        parts = [p for p in text[i + 1:r].split(" ") if p]
+        if not parts or len(parts) > 2 or (
+                len(parts) == 2 and not parts[1].isdigit()):
+            return tok
+        name = parts[0]
+        if len(name) != 1 and name.upper() not in auto.SpecialKeyNames:
+            return tok
+        i = r + 1
+    return None
 
 
 def send_keys(window_ctrl, keyspec: str, dry_run: bool = False) -> bool:

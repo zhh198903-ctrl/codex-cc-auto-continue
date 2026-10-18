@@ -25,11 +25,17 @@ import queue
 import secrets
 import threading
 import time
+from urllib.parse import unquote, urlsplit, parse_qs
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 API_VERSION = 1
 DEFAULT_PORT = 47830
 SEND_TIMEOUT_S = 10.0
+# How long a caller is kept waiting once its action has STARTED. Past
+# SEND_TIMEOUT_S an unstarted action is withdrawn and answered "busy"; a
+# started one is typing, so the caller waits for its real result instead.
+# Generous because a long line types at 20 ms a character.
+STARTED_WAIT_S = 120.0
 # Two calls for the same window inside this gap are the caller repeating
 # itself, not two separate intentions.
 MIN_SEND_GAP_S = 0.5
@@ -54,17 +60,31 @@ def discovery_path() -> str:
     the user cannot write to, and a discovery file nobody can create is a
     discovery file nobody can use.
     """
+    override = os.environ.get("AUTO_CONTINUE_DISCOVERY_FILE")
+    if override:
+        return override
     base = os.environ.get("APPDATA") or os.path.expanduser("~")
     return os.path.join(base, "Auto-Continue", "local_api.json")
 
 
-def write_discovery(port: int, token: str, version: str) -> str:
+def write_discovery(port: int, token: str, version: str,
+                    exe: str = None) -> str:
+    """Write where to find the running instance.
+
+    `exe` is the running copy's own path, so a companion that has to start
+    this tool again starts the user's copy rather than one it carries. One
+    that did (2026-09-27) put a two-week-old build in place of the running
+    one. Left out when running from source, where there is no exe to name.
+    """
     path = discovery_path()
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = path + ".tmp"
+    info = {"port": port, "token": token,
+            "version": version, "api": API_VERSION}
+    if exe:
+        info["exe"] = exe
     with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump({"port": port, "token": token,
-                   "version": version, "api": API_VERSION}, fh)
+        json.dump(info, fh)
     os.replace(tmp, path)      # never leave a half-written token on disk
     return path
 
@@ -182,7 +202,48 @@ class _Handler(BaseHTTPRequestHandler):
         raw = self.path.split("?", 1)
         path = raw[0].rstrip("/")
         parts = self._parts(self.path)
-        if path == "/v1/version":
+        if path == "/v1/codex/sessions" and ctx.get("codex_service"):
+            query = parse_qs(urlsplit(self.path).query, keep_blank_values=True)
+            try:
+                values = query.get('recent_limit')
+                limit = int(values[0]) if values and len(values) == 1 else None
+                if values is not None and (len(values) != 1 or limit is None or not 1 <= limit <= 100):
+                    raise ValueError('bad_recent_limit')
+                result = ctx["codex_service"].snapshot(limit) if values is not None else ctx["codex_service"].snapshot()
+            except (ValueError, TypeError):
+                self._reply(400, {'ok': False, 'reason': 'bad_recent_limit'})
+                return
+            self._reply(200, result)
+        elif path == "/v1/codex/usage" and ctx.get("codex_service"):
+            self._reply(200, ctx["codex_service"].usage())
+        elif path == "/v1/claude/usage" and ctx.get("codex_service"):
+            self._reply(200, ctx["codex_service"].usage('claude'))
+        elif path.startswith("/v1/codex/operations/") and ctx.get("codex_service"):
+            self._reply(200, ctx["codex_service"].operation(unquote(path.rsplit("/", 1)[-1])))
+        elif path.startswith("/v1/codex/sessions/") and path.endswith("/context") and ctx.get("codex_service"):
+            if not ctx.get("text_enabled", lambda: False)():
+                self._reply(403, {"ok": False, "reason": "text_disabled"})
+                return
+            query = parse_qs(urlsplit(self.path).query, keep_blank_values=True)
+            try:
+                before = int(query.get("before", [-1])[0])
+                after = int(query.get("after", [-1])[0])
+                compact_values = query.get("compact", ["0"])
+                if len(compact_values) != 1 or compact_values[0] not in {"0", "1"}:
+                    self._reply(400, {"ok": False, "reason": "bad_context_mode"})
+                    return
+                target = unquote(path[len("/v1/codex/sessions/"):-len("/context")])
+                if compact_values[0] == "1":
+                    result = ctx["codex_service"].context(target, before, after, compact=True)
+                else:
+                    result = ctx["codex_service"].context(target, before, after)
+            except Exception:
+                result = {"ok": False, "reason": "unavailable"}
+            self._reply(200, result)
+        elif path == "/v1/monitor":
+            service = ctx.get('codex_service')
+            self._reply(200, service.monitor_state() if service else {'ok': False, 'reason': 'no_route'})
+        elif path == "/v1/version":
             # The auto-answer switches are reported because a companion
             # program offering remote approval is in a race with them: this
             # tool answers a permission prompt within a pass, so a human
@@ -191,7 +252,9 @@ class _Handler(BaseHTTPRequestHandler):
             # wondering why approval sometimes does nothing.
             self._reply(200, {"app": "Auto-Continue",
                               "version": ctx.get("version", ""),
+                              "process_id": os.getpid(),
                               "api": API_VERSION,
+                              "capabilities": ctx.get("capabilities", {}),
                               "permission_autoanswer":
                                   bool(ctx.get("auto_permission",
                                                lambda: False)()),
@@ -233,6 +296,25 @@ class _Handler(BaseHTTPRequestHandler):
             return
         ctx = self.server.ctx
         parts = self._parts(self.path)
+        if parts == ["v1", "codex", "actions"] and ctx.get("codex_service"):
+            try:
+                data = self._body()
+            except Exception:
+                self._reply(400, {"ok": False, "reason": "bad_body"})
+                return
+            self._reply(200, ctx["codex_service"].submit(data))
+            return
+        if parts == ["v1", "monitor", "actions"] and ctx.get("codex_service"):
+            try:
+                data = self._body()
+            except Exception:
+                self._reply(400, {"ok": False, "reason": "bad_body"})
+                return
+            if not isinstance(data, dict) or not str(data.get("action", "")).startswith("monitor_"):
+                self._reply(400, {"ok": False, "reason": "bad_body"})
+                return
+            self._reply(200, ctx["codex_service"].submit(data))
+            return
         if parts == ["v1", "settings"]:
             # The only route that changes what the user configured. Kept to a
             # whitelist of two booleans and refused outright for anything else:

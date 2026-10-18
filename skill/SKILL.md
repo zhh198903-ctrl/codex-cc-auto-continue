@@ -1,31 +1,15 @@
 ---
 name: auto-continue
-description: 排查和配置 Auto-Continue —— Windows 上 Claude Code / Codex CLI / Codex 桌面 App 的看门狗。看懂活动日志、判断会话为什么没被接上、配置独立的监控模式、模型恢复与「跑完接下一棒」、把日志脱敏后发给作者。触发词：auto-continue, 自动继续, Codex CLI, 会话卡住没人管, 5 小时限制没恢复, 窗口没被接上, activity.log, 看门狗, watchdog, 模型恢复, after-finish, 导出日志反馈。
+description: 排查和配置 Auto-Continue —— Claude Code 在 Windows 上的看门狗。看懂它的活动日志（每行都带窗口 id）、判断某个会话为什么没被接上、配置模型恢复与「跑完接下一棒」、把日志脱敏后发给作者。触发词：auto-continue, 自动继续, 会话卡住没人管, 5 小时限制没恢复, 窗口没被接上, activity.log, 看门狗, watchdog, 模型恢复, after-finish, 导出日志反馈。
 ---
 
 # Auto-Continue
 
-Claude Code / Codex CLI / Codex 桌面 App 的 Windows 看门狗：监控故障和任务结束。
+Claude Code 的 Windows 看门狗：盯着「窗口停下来了」并替用户推下去。
 单文件免安装，MIT 开源、免费、可商用。
 
 **先读日志再下结论。** 它是屏幕抓取工具，凭记忆猜它「应该」怎么做，
 十次有九次猜错——日志里写着它当时看见了什么、做了什么。
-
-## Codex CLI 与桌面 App（v3.0.0）
-
-Codex EXE、Codex CLI、Claude CLI 三个同级标签页切换设置与监测表；各类监测可独立勾选或多选。日志固定在底部，全局启动和保持唤醒设置放在 App settings。Dry-run 保留为内部诊断设置，不呈现在 GUI。
-
-EXE 默认列出最近 5 条 Codex 活动，Recent 可调整为 1–100。排除 CLI、子代理、已归档、ChatGPT 普通聊天和 Work 会话。每条活动的 Model、Effort、Exclude、After finish 独立按 thread id 保存；同名会话也不能合并。隐藏活动可以配置，只有与当前可见原生 Codex 会话核对绑定后才可输入。
-
-CLI 和 EXE 各有 Poll、Buffer、Retry、Maximum retries 与独立 Advanced。权限模式可选完全访问（默认）、帮我批准、请求批准；自动批准工具权限默认开启，关闭后等待人工批准。普通选择框、模型对话框与登录提示不自动回答。不能把 Claude 的恢复脚本、正则、/model 或 /effort 命令直接发给 Codex。
-
-模型/强度通过原生会话菜单应用，不支持的值阻止发送并记日志。草稿、运行中、菜单、窗口不可读、未知终端身份会暂停自动输入。App 的 Send 不可用时保留自有草稿，提交确认后才扣减预算；编辑草稿、切换会话、Skip 或 Exclude 取消挂起发送。
-
-CLI 到额度重置时间加 Buffer 后继续；App 没有重置时间的额度提示按 Retry 有限重试。App 原生内部重试时不输入；历史错误和引用内容不触发。After finish 次数提交后立即扣减并保存，0 次不会发送。认证、付费和未知错误需要人工处理。本地 API 保持 Claude 范围。
-
-已用真实 CLI 0.160.0、App 26.930.3930.0（runtime 0.160.0）在隔离测试环境及本地故障注入中验证。App 未显示额度重置时间，因此不声称原生定时重置验证通过；App 命令提权被测试策略拒绝，工具权限验证使用实际 request_permissions 卡片。完整方法和限制见 docs/validation/codex-3.0.0.md。
-
-以下原有故障类型、自动许可与选择框说明适用于 Claude Code。
 
 ## 东西在哪
 
@@ -33,7 +17,7 @@ CLI 到额度重置时间加 Buffer 后继续；App 没有重置时间的额度�
 |---|---|
 | 活动日志 | `%LOCALAPPDATA%\auto_continue\activity.log` |
 | 轮转 | 到约 1 MB 转成 `.log.old`，只留一份；事发第二天排查记得连 `.old` 一起看 |
-| 设置 | 注册表，随 GUI 保存；三类各用自己的标签页、Advanced/More settings 和会话表；全局选项在 App settings |
+| 设置 | 注册表，随 GUI 保存；界面上 **Advanced…** 里全部可改 |
 | 日志本体 | 只记它自己的判断和动作，**从不记录终端内容** |
 
 ```bash
@@ -72,6 +56,10 @@ Windows 的 UI Automation 偶尔会拒绝一个窗口，这时它**什么都没�
 | `network retries exhausted` / `network API error` / `response truncated mid-stream` | 每隔重试间隔发一次 `continue`，直到会话重新开始输出 |
 | （屏幕上）`No response from the API after 6m · retrying once, waiting up to 10m` | **什么都不做**：这是 Claude Code 自己在重试，算「正在运行」。重试也失败、出现单独一行的 API 报错说没有响应时，才按网络错误处理 |
 
+网络连接错误认的是**括号里的大写错误码**（`ECONN·RESET`、`ETIMEDOUT` 这类），
+不是前面那句话（2.1.4 起）——那句话 Claude Code 两周里改了三次措辞，每改一次就有会话被晾着。
+某个会话明明停在一条带错误码的 API 报错上却没被推，先看是不是错误码不在括号里。
+
 网络类报错**必须单独成行**才算数（2.1.3 起）。夹在一句话中间的同样文字，是有人在引用它，
 通常是 Claude 在解释你贴的报错，不会被当成卡住去发 `continue`。
 | `limit on … → resets …; will fire at …` | 等到重置时间 + Buffer，再发 `continue` |
@@ -94,6 +82,12 @@ Windows 的 UI Automation 偶尔会拒绝一个窗口，这时它**什么都没�
    `is due but the session is mid-turn; holding the 'continue' until it goes quiet`。
    这不是卡住，是刻意的。
 4. **切换模型的对话框** —— 属于「模型恢复」那套流程，不会被当成普通选择框顺手回车。
+4b. **输入框里有没发出的字，或者有问题/权限提示开着**（2.1.4 起）——
+   网络 `continue`、限额恢复、after-finish、模型恢复都**先等着**，日志写一次
+   `… but the input box holds unsent text` / `a prompt is open and waiting for an answer`
+   或 `after-finish on … is held` / `Fable-recover: … holding`。
+   打字总以回车结尾：接在草稿后面会一起提交，按在权限提示上等于选了「Yes」。
+   用户把草稿发出去或清掉、把提示答掉，下一轮就照常发。**Fire now** 不受影响。
 5. **配套程序把自动回车关了** —— 日志 `api: settings auto_permission=off`
    （或 `auto_choose=off`）。这是本机另一个程序（例如手机上远程批准的那种）
    通过本地 API 关的，好让人来决定，Advanced 里的勾也跟着变了。之后的权限提示
@@ -101,6 +95,23 @@ Windows 的 UI Automation 偶尔会拒绝一个窗口，这时它**什么都没�
    打的字，不是本工具自己发的。这两行只记**动作**不记内容 ——
    `lines=1`、`<24 chars>{Enter}`（2.1.2 起；键名保留，打的字只剩字数）。
    想知道对方到底打了什么，去问那个程序，日志里没有。
+   配套程序收到 `busy` 就表示**什么都没做**（2.1.4 起），可以放心重试；
+   2.1.3 及之前 `busy` 之后动作仍可能在本轮巡检结束后被执行，
+   重试就会重复输入。若日志里同一窗口在几秒内出现两条内容相同的 `api: send`，多半是这个原因。
+   窗口停在选项框上时（权限提示、提问、多题表单、计划确认），那一行的 `prompt` 会带完整结构
+   （2.1.4 起）：问题、标题、页签、每个选项（编号、说明、光标、勾选、是否已选、是否是自己输入行）、
+   分隔线下的行、脚注。光标不在第 1 项也照样报——这只是「报」，本工具自己的自动回车仍然只在光标停在第 1 项时才按。
+   屏幕上读不出的字段是 null，不猜；会话内容（diff、计划全文）不给。
+   同一个键连按三次以上，日志记成 `{Back}×80` 这样的计数。
+   配套程序看到的窗口列表（`/windows`）每行带 `read_utc`，即那一行最后一次读屏的时间（2.1.4 起）；
+   单窗口重读（`/scan`）会先把结果写进列表再回复，两者不会再一个说有提示、一个说没有。
+   `api: send … not typed — the input box holds unsent text`（2.1.4 起）：
+   那个窗口的输入框里有人打了一半的字，配套程序拿到 `draft`，什么都没打、也没清。
+   以前会把新内容接在草稿后面一起提交。
+   配套程序拿到 `bad_keyspec` 说明键名写错了（退格是 `{Back}`，不是 `{Backspace}`），
+   重试没用；这种请求什么都没做，所以日志里也没有它。
+   `%APPDATA%\Auto-Continue\local_api.json` 里的 `exe` 是当前运行那一份的路径（2.1.4 起），
+   配套程序要重新拉起本工具时应该启动这一份，而不是它自己内置的旧版。
 
 ## 排查：某个会话没被接上
 
@@ -115,12 +126,19 @@ Windows 的 UI Automation 偶尔会拒绝一个窗口，这时它**什么都没�
    另一种是整个窗口这一轮没枚举到：`N open window(s) missing from this pass (#id …)`
    —— 状态会保留，不会重来；2.1.2 起括号里写明是哪几个窗口，
    **同一个 id 反复出现**才值得查，零星几次是正常的。
+   2.1.4 起窗口列表直接向 Windows 要，不再让 UIA 枚举整个桌面，
+   这行警告应该很少见了；2.1.4 之后还频繁出现，就值得报给作者。
    **一直不好、再也没恢复**，多半是这个窗口的会话进程已经被杀掉了，
    而终端窗口壳子还留着（典型：某个脚本 `taskkill /PID <claude> /T /F` 之后没关窗口）。
    这种窗口 Win32 看还在、UIA 也枚举得到，但 ConPTY 已死，文本读取永远 E_FAIL ——
    **它不会自己恢复，关掉这个窗口即可**。在它关掉之前，这个"窗口"一直占着一格覆盖数，
    而里面根本没有会话。
 3. **它是不是判断成「不该动」** —— 看有没有上面「故意不管」的那几条。
+   还有一种：`… is scrolled up (Claude Code shows 'Jump to bottom')`——
+   那个会话被往上翻了，屏幕上看不到它当前的状态，工具就先不动它；翻回底部会写
+   `… is back at the bottom`，然后照常处理。翻上去超过 60 分钟（Advanced → Answering 可改，0=不管）
+   会自动发一次 Ctrl+End 拉回底部：`scrolled … back to the bottom (Ctrl+End) after 60 min`
+   ——只移动视图，不往会话里打字。
 4. **发了但没送达吗** —— `retry send failed for …; will try again`
    说明按键没送出去（通常是发送瞬间焦点被别的窗口抢走），下一轮会自己重来。
 5. **模型额度用完（`You've reached your Fable limit …`）却没切模型** ——
@@ -139,12 +157,14 @@ Windows 的 UI Automation 偶尔会拒绝一个窗口，这时它**什么都没�
 - **Retry interval**（默认 600 秒）网络卡住时两次 `continue` 的间隔。调太短只会刷屏。
 - **Triggers** —— 四类横幅的识别正则可以自己改。Anthropic 改文案时这里先失效，
   也是第一个该看的地方。
+  自己改正则时别让几个可省略的空白（`\s*`）挨在一起：屏幕每行都用空格补满，
+  这种写法在空屏上要算好几秒，而且每个窗口每轮都算一遍（2.1.4 前内置的安全拦截正则就是这样）。
 - **模型恢复** / **跑完接下一棒（after-finish）** —— 都是**默认关闭、按窗口开启**；
   会自动打字的功能带次数上限，默认只跑一次，用完要手动再开。
 
 ## 报问题给作者
 
-`Export log for feedback…`（2.0.18 起，主界面按钮）导出一份**脱敏**日志：
+`Export log…`（2.0.18 起，主界面按钮；2.1.4 前叫 Export log for feedback…）导出一份**脱敏**日志：
 窗口标题和用户自己输入的提示词全部抹掉，窗口只以 `#id` 出现，
 斜杠命令和 `continue` 保留（它们不描述任何工作内容）。
 **写盘前会把全文摊出来让人过目**，确认了才保存。
@@ -158,3 +178,13 @@ Claude Code 的窗口是按对话内容命名的。所以要发的话用这个�
 
 MIT 开源，免费，可商用。源码与发布：
 `https://github.com/zhh198903-ctrl/codex-cc-auto-continue`
+
+
+## 3.1.0 Control integration
+
+本版本新增供 Control 使用的 Codex 本地接口：会话、操作回执、上下文及事件流。
+接口只监听本机环回并校验请求令牌；读取会话正文仍需单独开启。
+按完整会话标识区分同名会话，多窗口显示同一会话时避免重复发送。
+Control 接管期间暂停相应自动批准及权限模式改动，按既有配置保留恢复与续接；
+操作结果不确定时暂停目标，不通过重复发送猜测结果。
+技能与程序同版发布。Control 内自带副本随其自己的整包更新。

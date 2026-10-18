@@ -234,6 +234,9 @@ class CodexGuiMixin:
         self._save_cli_settings()
 
     def _start_selected_watchers(self):
+        if getattr(getattr(self, 'codex_service', None), 'monitor_owner', ''):
+            self._append_log('info', 'Monitoring paused while Codex Claude Control uses its bundled driver')
+            return
         selected = self._selected_clis()
         self._watch_requested = bool(selected)
         (self.sig_claude_start if "claude" in selected else self.sig_claude_stop).emit()
@@ -251,7 +254,18 @@ class CodexGuiMixin:
                                     if claude_row_allowed(r["hwnd"])]
         self._merge_cli_rows()
 
+    def _on_codex_rpc_snapshot(self, rows):
+        self._cli_rows["codex"] = rows
+        self._merge_cli_rows()
+
+    def _on_codex_rpc_loops_spent(self, tid, left):
+        self._codex_config["sessions"].setdefault(tid, {})["loops"] = left
+        self._save_cli_settings()
+
     def _on_codex_snapshot(self, rows):
+        service = getattr(self, "codex_service", None)
+        if service and service.cli.connected:
+            return
         self._cli_rows["codex"] = rows
         self._merge_cli_rows()
 
@@ -402,9 +416,12 @@ class CodexGuiMixin:
             self._apply_codex_config()
 
     def _cli_action(self, row, action):
+        if row.get("rpc") and action in {"fire", "skip", "cooldown"}:
+            self.codex_service.native_cli_action.emit(dict(target_id="codex:"+row["thread_id"], action=action))
+            return
         provider = row.get("provider")
         codex = provider in ("codex", "codex_app")
-        thread_id = row.get("thread_id", "") if provider == "codex_app" else ""
+        thread_id = row.get("thread_id", "")
         if action == "link" and thread_id:
             candidates = self._codex_link_candidates(row)
             if self._cli_running["codex_app"] and len(candidates) == 1:
@@ -451,8 +468,8 @@ class CodexGuiMixin:
                 self._do_unexclude(row["title"])
 
     def _on_codex_override(self, title, kind, value, provider="codex", thread_id=""):
-        if provider == "codex_app" and thread_id:
-            self._codex_app_config["sessions"].setdefault(thread_id, {})[kind] = value or ""
+        if thread_id:
+            self._codex_settings(provider)["sessions"].setdefault(thread_id, {})[kind] = value or ""
             self._apply_codex_config()
             return
         values = self._codex_settings(provider)[kind + "_overrides"]

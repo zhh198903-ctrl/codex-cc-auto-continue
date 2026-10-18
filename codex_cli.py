@@ -7,6 +7,7 @@ an old startup banner in shell scrollback is insufficient.
 from __future__ import annotations
 
 import ctypes
+import os
 import hashlib
 import re
 import time
@@ -169,6 +170,8 @@ def inspect_screen(text: str, now: datetime | None = None) -> Screen:
 
 
 def terminal_handles() -> list[int]:
+    if os.environ.get('CONTROL_TEST_RPC_ONLY') == '1':
+        return []
     handles = []
     u32 = ctypes.windll.user32
     callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)

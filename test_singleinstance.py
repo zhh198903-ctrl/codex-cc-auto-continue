@@ -40,8 +40,8 @@ k.CreateEventW.argtypes = [wintypes.LPVOID, wintypes.BOOL, wintypes.BOOL,
 k.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
 
 # Unique names so a real running Auto-Continue can't perturb the test.
-SHOW = "Local\\AC_TEST_SHOW"
-ACK = "Local\\AC_TEST_ACK"
+SHOW = f"Local\\AC_TEST_SHOW_{os.getpid()}"
+ACK = f"Local\\AC_TEST_ACK_{os.getpid()}"
 show_ev = k.CreateEventW(None, False, False, SHOW)
 ack_ev = k.CreateEventW(None, False, False, ACK)
 check("named events created", bool(show_ev) and bool(ack_ev))

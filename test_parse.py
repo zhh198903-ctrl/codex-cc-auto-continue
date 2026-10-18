@@ -241,6 +241,20 @@ econn_samples = [
     # must be poked like the old one...
     ("  API Err" "or: No resp" "onse from the API after 16m\n"
      "  Crunched for 16m 2s · done 12:48\n> \n", True),
+    # 2026-09-24, pasted by the user: a CMIS session sat idle for hours
+    # behind this — new wording, same errno.
+    ("● API Err" "or: Connection dropped (ECONN" "RESET)\n\n"
+     "✻ Cooked for 3h 44m 10s · done 14:53\n\n"
+     "※ recap: 我在按规范逐轮检查 CMIS 工具，每轮修一个缺陷并发布。"
+     "下一轮 08:52 自动开始。 (disable recaps in /config)\n> \n", True),
+    # Any future wording that still carries the code is caught the same way...
+    ("  API Err" "or: Socket closed unexpectedly (EP" "IPE)\n> \n", True),
+    # ...but an ordinary parenthesised word is not an errno.
+    ("  API Err" "or: press (Enter) to retry\n> \n", False),
+    ("  API Err" "or: something failed (Error)\n> \n", False),
+    # And the new wording quoted mid-sentence is still just a quote.
+    ("  earlier the log said API Err" "or: Connection dropped (ECONN" "RESET) "
+     "but it recovered\n> \n", False),
     # ...but the IN-FLIGHT notice is Claude Code still retrying on its own:
     # no "API Error:" prefix, and a 'continue' now would queue behind it.
     ("✻ No resp" "onse from the API after 6m · retrying once, "
@@ -1178,6 +1192,11 @@ check_reset("KS1 a pure key token survives intact — the useful part",
       ac.summarize_keyspec("{Enter}") == "{Enter}")
 check_reset("KS2 several tokens stay readable",
       ac.summarize_keyspec("{Esc}{Esc}") == "{Esc}{Esc}")
+check_reset("KS2b a long run of one key becomes a count",
+      ac.summarize_keyspec("{Back}" * 80) == "{Back}×80")
+check_reset("KS2c runs are counted where they are, around other tokens",
+      ac.summarize_keyspec("{Back}" * 3 + "hi{Enter}")
+      == "{Back}×3<2 chars>{Enter}")
 check_reset("KS3 typed words become a count, not the words",
       ac.summarize_keyspec("hello") == "<5 chars>")
 check_reset("KS4 a sentence with a key keeps the key and drops the sentence",
@@ -1224,6 +1243,28 @@ check_reset("PQ6 but the retry banner riding on its own error line is real",
                 "  ⎿  API Err" "or (Connection error.) · Retry" "ing in 0s · "
                 "attempt 10/10" + _PROMPT))
 
+print("---- a whole turn since the error means it is history ----")
+# 2026-09-25: a session waiting on background shells answered the 'continue'
+# in 29 seconds, between two passes; running was never caught, so it was poked
+# again ten minutes later for nothing.
+_B = "● API Err" "or: Connection dropped (ECONN" "RESET)"
+_F = "\n" + "─" * 40 + "\n❯ \n" + "─" * 40 + "\n"
+check_reset("TC1 error + only its own done-stamp is still stuck",
+            ac.parse_econnreset_stuck(_B + "\n\n✻ Worked for 3m · done 10:43" + _F))
+check_reset("TC2 error, then a prompt and a finished turn, is recovered",
+            not ac.parse_econnreset_stuck(
+                _B + "\n\n✻ Worked for 3m · done 10:43\n\n> continue\n\n"
+                "● still at gate 1, waiting on the chain\n\n"
+                "✻ Cogitated for 29s · done 10:44 · 2 shells still running" + _F))
+check_reset("TC3 a continue still QUEUED (never run) is not recovery",
+            ac.parse_econnreset_stuck(
+                _B + "\n\n✻ Crunched for 18m · done 9:50\n\n> continue\n"
+                "  ctrl+x ctrl+s to send now" + _F))
+check_reset("TC4 a draft in the input box is not a prompt that ran",
+            ac.parse_econnreset_stuck(
+                _B + "\n\n✻ Worked for 3m · done 10:43\n" + "─" * 40
+                + "\n❯ contin\n" + "─" * 40))
+
 print("---- a turn waiting on the API is still a running turn ----")
 # Claude Code replaces the spinner line, timer and all, while it waits out a
 # first-byte timeout itself. Everything that waits for "idle" (after-finish,
@@ -1237,9 +1278,371 @@ check_reset("RW2 the first-byte retry wait is running too",
                                "retrying once, waiting up to 10m" + _FOOT))
 check_reset("RW3 a finished turn is not",
             not ac.session_running("✻ Worked for 9s · done 21:32" + _FOOT))
+check_reset("RW5 a first-byte wait whose timer has no '·' is running "
+            "(captured live 2026-09-25)",
+            ac.session_running("✽ Effecting… (1m 51s)" + _FOOT))
+check_reset("RW6 a turn's first seconds, no timer at all, is running",
+            ac.session_running("✶ Effecting…" + _FOOT))
+check_reset("RW7 a turn that has FINISHED is not, even with a long timer",
+            not ac.session_running("✻ Crunched for 18m 51s · done 9:50" + _FOOT))
+check_reset("RW8 prose with an ellipsis is not a spinner",
+            not ac.session_running("  I tried again… it failed" + _FOOT))
+# The exact shape that got 'continue' queued into a live request, three times
+# in an hour: the previous turn's error banner above, the new turn spinning
+# below it with no '·' in its timer.
+_LIVE = ("● API Err" "or: No resp" "onse from API (waited 9m, then 10m on the "
+         "retry).\n\n✻ Crunched for 18m 51s · done 9:50\n\n> continue\n"
+         "  ctrl+x ctrl+s to send now\n\n✽ Effecting… (1m 51s)\n" + _FOOT)
+check_reset("RW9 an error ABOVE a turn that is spinning again is not stuck",
+            not ac.parse_econnreset_stuck(_LIVE))
 check_reset("RW4 nor is prose that merely mentions retrying",
             not ac.session_running("we are retrying the build later today"
                                    + _FOOT))
+
+
+print("---- KP: a key spec checked before it is typed ----")
+# uiautomation finds a bad key name only while typing, and the API reported
+# that as 'foreground' -- "try again" -- for {Backspace}, which can never work
+# (its name is {Back}). 2026-09-27, live against the ccdebug probe.
+for _spec in ("{Enter}", "{Back}{Back}", "{Ctrl}{End}", "{Esc}", "hi{Enter}",
+              "{{}x{}}", "{a 3}", "{Shift}{Tab}"):
+    tcheck(f"KP1 {_spec!r} is pressable", ac.keyspec_problem(_spec) is None)
+tcheck("KP2 {Backspace} is named as the problem",
+       ac.keyspec_problem("x{Backspace}") == "{Backspace}")
+tcheck("KP3 a count that is not a number is refused",
+       ac.keyspec_problem("{a b}") == "{a b}")
+tcheck("KP4 an unclosed brace is refused, not typed half-way",
+       ac.keyspec_problem("ok{") == "{")
+tcheck("KP5 an empty {} is refused, as uiautomation would",
+       ac.keyspec_problem("{}") == "{}")
+
+print("---- HP: when this tool must not type a line ----")
+# Every line this tool types ends in Enter: on a draft it submits both as one
+# message, into an open prompt the Enter picks the highlighted option. The
+# cursor may be on any row -- the arrow keys move it -- so "open" cannot
+# depend on it sitting on 1 (2026-09-27). Fixtures keep the marker and the
+# digit apart so this file cannot make a watched terminal press Enter.
+_C = "❯ "
+_Q = "Which approach?\n"
+_HINT = "\n\nEnter to select · Esc to cancel"
+_ON1 = _Q + _C + "1" ". Small\n  2" ". Large\n  3" ". Other" + _HINT
+_ON3 = _Q + "  1" ". Small\n  2" ". Large\n" + _C + "3" ". Other" + _HINT
+_BOX = "\n❯ "
+tcheck("HP1 cursor on 1 is an open prompt", ac.prompt_open(_ON1))
+tcheck("HP2 cursor on 3 is an open prompt too", ac.prompt_open(_ON3))
+tcheck("HP3 answered: the input box is back below it, so not open",
+       not ac.prompt_open(_ON3 + "\n\nreply text" + _BOX))
+tcheck("HP4 one quoted '> 3.' line is not a list",
+       not ac.prompt_open("see step\n" + _C + "3" ". Other\nand more text"))
+tcheck("HP5 far up the scrollback is not open",
+       not ac.prompt_open(_ON3 + "\n" + ("x" * 120 + "\n") * 40))
+tcheck("HP6 a draft is a reason to hold",
+       ac.typing_hold_reason("output\n❯ half a thought")
+       == "the input box holds unsent text")
+tcheck("HP7 an open prompt is a reason to hold",
+       "prompt is open" in (ac.typing_hold_reason(_ON3) or ""))
+tcheck("HP8 an empty box is not", ac.typing_hold_reason("output" + _BOX) is None)
+tcheck("HP9 an unreadable screen is not: unknown types as before",
+       ac.typing_hold_reason("") is None)
+
+print("---- V8: an open prompt as data (cc-remote's S5 screens) ----")
+# Real Claude Code 2.1.283 screens read over UIA in cc-remote's cc_debug
+# window (their docs/spikes/S5-cc-choosers.md, copied here, not linked).
+# Rows are ASSEMBLED so this file never holds a cursor marker next to a row
+# number: viewed in a watched terminal it must not look like a chooser.
+_CUR = "\u276f "
+
+
+def _R(n, label, cur=False, lead="  "):
+    return (lead[:-2] + _CUR if cur else lead) + str(n) + ". " + label
+
+
+_SEP = "\u2500" * 78
+_DASH = "\u254c" * 76
+_HNT = ("Enter to select \u00b7 Tab/Arrow keys to navigate \u00b7 "
+        "Esc to cancel")
+_BAR0 = "\u2190  \u2610 Color  \u2610 Extras  \u2714 Submit  \u2192"
+_FORM1 = "\n".join([
+    "earlier conversation", _SEP, _BAR0, "Which color for the demo?",
+    _R(1, "Red", cur=True), "     warm", _R(2, "Green"), "     calm",
+    _R(3, "Blue"), "     cool", _R(4, "Type something."), _SEP,
+    _R(5, "Chat about this"), _HNT])
+_p = ac.classify_prompt(_FORM1)
+tcheck("V8a a two-question form reads as a chooser", _p and _p["kind"] == "chooser")
+tcheck("V8b its question", _p["question"] == "Which color for the demo?"
+       and _p["text"] == "Which color for the demo?")
+tcheck("V8c its tabs, with Submit marked",
+       _p["tabs"] == [{"label": "Color", "done": False},
+                      {"label": "Extras", "done": False},
+                      {"label": "Submit", "submit": True}] and _p["tab"] == 0)
+tcheck("V8d options in screen order, with their descriptions",
+       [(o["n"], o["label"], o["desc"]) for o in _p["options"]]
+       == [(1, "Red", "warm"), (2, "Green", "calm"), (3, "Blue", "cool"),
+           (4, "Type something.", None)])
+tcheck("V8e cursor on 1, no check boxes, nothing picked",
+       [o["cursor"] for o in _p["options"]] == [True, False, False, False]
+       and all(o["check"] is None and o["picked"] is False
+               for o in _p["options"]))
+tcheck("V8f only the typed-answer row is an input",
+       [o["input"] for o in _p["options"]] == [False, False, False, True])
+tcheck("V8g the row under the rule is 'below', with its number",
+       _p["below"] == [{"n": 5, "label": "Chat about this"}])
+tcheck("V8h hint verbatim, layout list, no title",
+       _p["hint"] == _HNT and _p["layout"] == "list" and _p["title"] == [])
+
+# Down: the cursor leaves row 1. Still reported, same sig -- and NOT
+# something auto-answer will act on.
+_FORM1D = _FORM1.replace(_CUR + "1", "  1").replace("  2. Green",
+                                                    _CUR + "2. Green")
+_pd = ac.classify_prompt(_FORM1D)
+tcheck("V8i after Down the prompt is still there (it vanished before)",
+       _pd is not None and _pd["options"][1]["cursor"]
+       and not _pd["options"][0]["cursor"])
+tcheck("V8j same prompt, same sig", _pd["sig"] == _p["sig"])
+tcheck("V8k auto-answer still needs the cursor on 1",
+       not ac.parse_chooser_prompt(_FORM1D))
+
+_BAR1 = "\u2190  \u2612 Color  \u2610 Extras  \u2714 Submit  \u2192"
+_MULTI = "\n".join([
+    _SEP, _BAR1, "Which extras should be added?",
+    _R(1, "[ ] Sound", cur=True), "         beeps", _R(2, "[ ] Light"),
+    "         flash", _R(3, "[ ] Vibrate"), "         buzz",
+    _R(4, "[ ] Type something"), "     Submit", _SEP,
+    _R(5, "Chat about this"), _HNT])
+_pm = ac.classify_prompt(_MULTI)
+tcheck("V8l multi-choice: check boxes read, labels without them",
+       [(o["label"], o["check"]) for o in _pm["options"]]
+       == [("Sound", False), ("Light", False), ("Vibrate", False),
+           ("Type something", False)])
+tcheck("V8m descriptions line up under the label, not the box",
+       [o["desc"] for o in _pm["options"]] == ["beeps", "flash", "buzz", None])
+tcheck("V8n the unnumbered Submit row goes to below with n null",
+       _pm["below"] == [{"n": None, "label": "Submit"},
+                        {"n": 5, "label": "Chat about this"}])
+tcheck("V8o second question is the current tab", _pm["tab"] == 1)
+_MULTI2 = (_MULTI.replace("[ ] Sound", "[\u2714] Sound")
+           .replace("[ ] Vibrate", "[\u2714] Vibrate")
+           .replace("\u2610 Extras", "\u2612 Extras"))
+_pm2 = ac.classify_prompt(_MULTI2)
+tcheck("V8p toggles read as checked",
+       [o["check"] for o in _pm2["options"]] == [True, False, True, False])
+tcheck("V8q and do not change the sig", _pm2["sig"] == _pm["sig"])
+
+_REVIEW = "\n".join([
+    _SEP, "\u2190  \u2612 Color  \u2612 Extras  \u2714 Submit  \u2192",
+    "Review your answers", " \u25cf Which color for the demo?",
+    "   \u2192 Blue", " \u25cf Which extras should be added?",
+    "   \u2192 Sound, Vibrate", "Ready to submit your answers?",
+    _R(1, "Submit answers", cur=True), _R(2, "Cancel")])
+_pr = ac.classify_prompt(_REVIEW)
+tcheck("V8r review page: the submit question and its two options",
+       _pr["question"] == "Ready to submit your answers?"
+       and [o["label"] for o in _pr["options"]] == ["Submit answers", "Cancel"])
+tcheck("V8s its title is the answers under 'Review your answers'",
+       _pr["title"] == ["\u25cf Which color for the demo?", "\u2192 Blue",
+                        "\u25cf Which extras should be added?",
+                        "\u2192 Sound, Vibrate"])
+tcheck("V8t and the current tab is Submit", _pr["tab"] == 2)
+
+_BACK = "\n".join([
+    _SEP, "\u2190  \u2612 Color  \u2612 Extras  \u2714 Submit  \u2192",
+    "Which color for the demo?", _R(1, "Red"), "     warm", _R(2, "Green"),
+    "     calm", _R(3, "Blue \u2714"), "     cool",
+    _R(4, "Purple", cur=True), _SEP, _R(5, "Chat about this"),
+    _HNT + " \u00b7 ctrl+g to edit in Notepad"])
+_pb = ac.classify_prompt(_BACK)
+tcheck("V8u a revisited answer is picked, its mark off the label",
+       _pb["options"][2]["label"] == "Blue" and _pb["options"][2]["picked"])
+tcheck("V8v typed text in the answer row is its label, and it is the input",
+       _pb["options"][3]["label"] == "Purple" and _pb["options"][3]["input"]
+       and _pb["options"][3]["cursor"])
+tcheck("V8w typing does not change the sig of the question it answers",
+       _pb["sig"] == ac.classify_prompt(_BACK.replace("Purple", "Pu"))["sig"])
+
+_ONE = "\n".join([
+    _SEP, " \u2610 Name", "Pick a project name", _R(1, "Alpha", cur=True),
+    "     first", _R(2, "Beta"), "     second", _R(3, "Type something."),
+    _SEP, _R(4, "Chat about this"),
+    "Enter to select \u00b7 \u2191/\u2193 to navigate \u00b7 Esc to cancel"])
+_po = ac.classify_prompt(_ONE)
+tcheck("V8x one question: a one-tab bar, first tab current",
+       _po["tabs"] == [{"label": "Name", "done": False}] and _po["tab"] == 0
+       and [o["input"] for o in _po["options"]] == [False, False, True])
+
+_PANEL = "\u2502 [ A ] [ B ] [ C ]                        \u2502"
+_PREVIEW = "\n".join([
+    " \u2610 Layout", "Which layout?",
+    _R(1, "Grid", cur=True) + " " * 25 + "\u250c" + "\u2500" * 42 + "\u2510",
+    _R(2, "List") + " " * 25 + _PANEL,
+    " " * 34 + _PANEL, " " * 34 + "\u2514" + "\u2500" * 42 + "\u2518",
+    " " * 34 + "Notes: press n to add notes", _SEP, "  Chat about this",
+    "Enter to select \u00b7 \u2191/\u2193 to navigate \u00b7 n to add notes"
+    " \u00b7 Esc to cancel"])
+_pv = ac.classify_prompt(_PREVIEW)
+tcheck("V8y preview layout: labels without the panel, no descriptions",
+       _pv["layout"] == "preview"
+       and [(o["label"], o["desc"]) for o in _pv["options"]]
+       == [("Grid", None), ("List", None)])
+tcheck("V8z its 'Chat about this' has no number, so n is null",
+       _pv["below"] == [{"n": None, "label": "Chat about this"}]
+       and not any(o["input"] for o in _pv["options"]))
+
+_PERM = "\n".join([
+    "\u25cf Write(opts.txt)", _SEP, " Create file", " opts.txt", _DASH,
+    "  1 opts", _DASH, " Do you want to create opts.txt?",
+    _R(1, "Yes", cur=True, lead="   "),
+    _R(2, "Yes, and switch to accept edits (auto-approve file edits and "
+          "common file commands) for this session (shift+tab)", lead="   "),
+    _R(3, "No", lead="   "), " Esc to cancel \u00b7 Tab to amend"])
+_pp = ac.classify_prompt(_PERM)
+tcheck("V8A permission prompt: kind, title, question",
+       _pp["kind"] == "permission" and _pp["title"] == ["Create file", "opts.txt"]
+       and _pp["question"] == "Do you want to create opts.txt?")
+tcheck("V8B its three options and its hint",
+       [o["label"][:14] for o in _pp["options"]]
+       == ["Yes", "Yes, and switc", "No"]
+       and _pp["hint"] == "Esc to cancel \u00b7 Tab to amend"
+       and _pp["below"] == [])
+_PERM3 = (_PERM.replace(_CUR + "1", "  1")
+          .replace("   3. No", " " + _CUR + "3. No"))
+_pp3 = ac.classify_prompt(_PERM3)
+tcheck("V8C cursor on No: still a permission prompt, cursor on 3",
+       _pp3 and _pp3["kind"] == "permission" and _pp3["options"][2]["cursor"])
+tcheck("V8D and auto-permission would NOT press Enter on it",
+       not ac.parse_permission_prompt(_PERM3))
+
+_PLAN = "\n".join([
+    " " + "\u2500" * 76, "  Ready to code?", "  Here is Claude's plan:",
+    " " + _DASH, "  Create plan.txt containing the word plan.", " " + _DASH,
+    " " + "\u2500" * 76,
+    "  Claude has written up a plan and is ready to execute. "
+    "Would you like to proceed?",
+    _R(1, "Yes, and use auto mode", cur=True, lead="    "),
+    _R(2, "Yes, manually approve edits", lead="    "),
+    _R(3, "Tell Claude what to change", lead="    "),
+    "       shift+tab to approve with this feedback",
+    "  ctrl+g to edit in Notepad \u00b7 C:\\plans\\plan-x.md"])
+_pl = ac.classify_prompt(_PLAN)
+tcheck("V8E plan confirmation: title from above the plan text",
+       _pl["title"] == ["Ready to code?", "Here is Claude's plan:"])
+tcheck("V8F its question and the feedback row as the input",
+       _pl["question"].endswith("Would you like to proceed?")
+       and [o["input"] for o in _pl["options"]] == [False, False, True]
+       and _pl["options"][2]["desc"] == "shift+tab to approve with this feedback")
+tcheck("V8G no Esc in its hint", "Esc to cancel" not in _pl["hint"])
+_PLAN3 = (_PLAN.replace(_CUR + "1", "  1")
+          .replace("    3. Tell Claude what to change",
+                   "  " + _CUR + "3. no file, just rep"))
+_pl3 = ac.classify_prompt(_PLAN3)
+tcheck("V8H typed feedback keeps the row an input (by its description)",
+       _pl3["options"][2]["input"] and _pl3["options"][2]["label"]
+       == "no file, just rep" and not _pl3["options"][0]["input"])
+
+# The live 2.1.283 shape (ccdebug, 2026-09-28) differs from the sample: a
+# blank line between the two title lines, and no closing dashed rule -- the
+# plan text, numbered steps and all, runs straight into the question's rule.
+_PLAN_LIVE = "\n".join([
+    "  " + "\u2500" * 116, "   Ready to code?", "", "   Here is Claude's plan:",
+    "  " + "\u254c" * 116, "   Plan: create plan_probe.txt", "",
+    "   Steps", "", "   " + "1" ". Use the Write tool to create the file.",
+    "  " + "\u2500" * 116,
+    "   Claude has written up a plan and is ready to execute. "
+    "Would you like to proceed?",
+    _R(1, "Yes, and switch to bypass permissions", cur=True, lead="     "),
+    _R(2, "Yes, manually approve edits", lead="     "),
+    _R(3, "Tell Claude what to change", lead="     "),
+    "        shift+tab to approve with this feedback",
+    "   ctrl+g to edit in Notepad \u00b7 C:\\plans\\plan-y.md"])
+_pll = ac.classify_prompt(_PLAN_LIVE)
+tcheck("V8H2 live plan shape: both title lines, the plan's own numbered "
+       "step not taken for an option",
+       _pll["title"] == ["Ready to code?", "Here is Claude's plan:"]
+       and [o["n"] for o in _pll["options"]] == [1, 2, 3])
+
+tcheck("V8I nothing open, nothing reported", ac.classify_prompt(
+    "all done\n\u276f\u00a0") is None)
+tcheck("V8J an answered form with the input box back is not open",
+       ac.classify_prompt(_FORM1 + "\n\nok\n\u276f\u00a0") is None)
+
+print("---- RX: no default trigger is slow on a padded screen ----")
+# Claude Code pads every line to the window width, so a screen is mostly
+# blanks. The safeguard pattern once let three whitespace runs share them:
+# 5.6 s for one 3.6 KB tail, holding the GIL, every pass (2026-09-27). Every
+# default gets the worst shape: words at line ends, then long blank runs.
+import re as _rx
+import time as _tm
+_pad = "".join((("Fable 5.1 word." if _i % 7 == 0 else "").ljust(119) + "\n")
+               for _i in range(84))[-ac.SCAN_TAIL_CHARS:]
+for _k, _v in ac.TRIGGER_DEFAULTS.items():
+    _c = _rx.compile(_v, _rx.IGNORECASE)
+    _t = _tm.time()
+    list(_c.finditer(_pad))
+    _d = _tm.time() - _t
+    tcheck(f"RX1 {_k} scans a padded 10 KB screen fast ({_d * 1000:.1f} ms)",
+           _d < 0.05)
+_t = _tm.time()
+ac.fable_refusal_distance(_pad)
+tcheck("RX2 the safeguard check itself, as the pass calls it",
+       _tm.time() - _t < 0.05)
+
+print("---- EN: the window list comes from the OS ----")
+# The desktop-wide UIA listing took 0.75-9 s a pass (2026-09-27) and
+# sometimes came back empty with every terminal open. The OS says which
+# windows exist; UIA is asked about those alone, and the old listing is only
+# the fallback.
+_real_hw, _real_cfh, _real_uia = (ac._cascadia_hwnds, ac.auto.ControlFromHandle,
+                                  ac._find_terminal_windows_uia)
+_uia_calls = []
+
+
+class _Ctl:
+    def __init__(self, h): self.NativeWindowHandle = h
+
+
+try:
+    ac._find_terminal_windows_uia = lambda: _uia_calls.append(1) or ["uia"]
+    ac._cascadia_hwnds = lambda: [11, 12, 13]
+    ac.auto.ControlFromHandle = lambda h: _Ctl(h)
+    _got = ac.find_terminal_windows()
+    tcheck("EN1 every terminal the OS reports is wrapped, in its order",
+           [c.NativeWindowHandle for c in _got] == [11, 12, 13])
+    tcheck("EN2 without the slow desktop listing", _uia_calls == [])
+
+    def _flaky(h):
+        if h == 12:
+            raise RuntimeError("COMError")
+        return _Ctl(h)
+    ac.auto.ControlFromHandle = _flaky
+    tcheck("EN3 one handle UIA cannot wrap is left out, not the whole pass",
+           [c.NativeWindowHandle for c in ac.find_terminal_windows()] == [11, 13])
+
+    def _boom():
+        raise OSError("EnumWindows failed")
+    ac._cascadia_hwnds = _boom
+    tcheck("EN4 if the OS listing fails, the old UIA listing answers",
+           ac.find_terminal_windows() == ["uia"])
+    ac._cascadia_hwnds = lambda: []
+    tcheck("EN5 and when the OS finds none, UIA is asked before saying none",
+           ac.find_terminal_windows() == ["uia"])
+finally:
+    ac._cascadia_hwnds, ac.auto.ControlFromHandle,         ac._find_terminal_windows_uia = _real_hw, _real_cfh, _real_uia
+tcheck("EN6 the real OS listing runs here and returns plain handles",
+       all(isinstance(h, int) for h in ac._cascadia_hwnds()))
+
+print("---- WH: a window asked for by handle ----")
+# The local API asks its one window directly instead of listing the desktop
+# (the listing took up to 9 s on 2026-09-27). It must still only ever hand
+# back a visible terminal window, or a caller could type into anything with
+# a handle.
+import ctypes as _ct
+tcheck("WH1 no handle, no window", ac.terminal_window_from_handle(0) is None)
+tcheck("WH2 a handle that is not a window is None",
+      ac.terminal_window_from_handle(1) is None)
+tcheck("WH3 a real window that is not a terminal is None",
+      ac.terminal_window_from_handle(
+          int(_ct.windll.user32.GetDesktopWindow())) is None)
+tcheck("WH4 garbage is None, not an exception",
+      ac.terminal_window_from_handle("not a handle") is None)
 
 
 sys.exit(1 if failures else 0)

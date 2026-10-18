@@ -73,6 +73,9 @@ check("A5 the right token is let through", call("/v1/version", T)[0] == 200)
 
 print("---- B: the routes ----")
 code, body = call("/v1/version", T)
+import os
+check("B0 authenticated version identifies the serving process",
+      type(body.get('process_id')) is int and body['process_id'] == os.getpid())
 check("B1 version names the app and the api level",
       body.get("app") == "Auto-Continue" and body.get("api") == local_api.API_VERSION)
 # A companion offering remote approval races the tool's own auto-answer, so
@@ -153,6 +156,14 @@ with open(path, encoding="utf-8") as fh:
 check("E1 it carries the port, token and api level",
       disc["port"] == PORT and disc["token"] == T
       and disc["api"] == local_api.API_VERSION)
+check("E1b from source there is no exe to name, so none is written",
+      "exe" not in disc)
+_exe = r"C:\Tools\Auto-Continue.exe"
+with open(local_api.write_discovery(PORT, T, "9.9.9", exe=_exe),
+          encoding="utf-8") as fh:
+    disc = json.load(fh)
+check("E1c a frozen copy names its own exe, so a companion restarts the "
+      "user's copy and not one it carries", disc.get("exe") == _exe)
 local_api.clear_discovery()
 check("E2 switching off takes the token file with it",
       not os.path.exists(path))

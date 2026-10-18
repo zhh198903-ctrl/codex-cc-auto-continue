@@ -19,6 +19,20 @@ MAX_LIMIT = 100
 TAIL_BYTES = 256 * 1024
 
 
+def _thread_filters(columns):
+    filters = "archived=0 AND source IN ('vscode','desktop')"
+    if 'thread_source' in columns:
+        # The app's explicitly created chats are user-visible Codex threads.
+        # Hidden subagent sessions and other clients remain excluded.
+        filters += " AND (thread_source IS NULL OR thread_source IN ('user','agent_created_thread'))"
+    return filters
+
+
+def _display_title(data):
+    # A manual/app-specified name overrides the automatically generated title.
+    return data.get('name') or data.get('title') or ''
+
+
 def activity_limit(value):
     try:
         return min(MAX_LIMIT, max(1, int(value)))
@@ -149,9 +163,8 @@ class RecentActivities:
         try:
             with closing(_connect(index)) as db:
                 columns = {r['name'] for r in db.execute('PRAGMA table_info(threads)')}
-                filters = "title=? AND archived=0 AND source IN ('vscode','desktop')"
-                if 'thread_source' in columns:
-                    filters += " AND (thread_source IS NULL OR thread_source='user')"
+                title_column = "COALESCE(NULLIF(name,''),title)" if 'name' in columns else 'title'
+                filters = title_column + "=? AND " + _thread_filters(columns)
                 for row in db.execute(f'SELECT * FROM threads WHERE {filters}', (title,)):
                     data = dict(row)
                     origin = data.get('originator') or self._metadata(Path(data['rollout_path'])).get('originator')
@@ -170,17 +183,111 @@ class RecentActivities:
             return None
         try:
             with closing(_connect(index)) as db:
-                row = db.execute("SELECT * FROM threads WHERE id=? AND archived=0 AND source IN ('vscode','desktop')",
+                columns = {r['name'] for r in db.execute('PRAGMA table_info(threads)')}
+                row = db.execute("SELECT * FROM threads WHERE id=? AND " + _thread_filters(columns),
                                  (thread_id,)).fetchone()
                 if row is None:
                     return None
                 data = dict(row)
                 origin = data.get('originator') or self._metadata(Path(data['rollout_path'])).get('originator')
-                if origin != 'Codex Desktop' or data.get('thread_source') not in (None, 'user'):
+                if origin != 'Codex Desktop':
                     return None
+                data['title'] = _display_title(data)
                 return data
         except (sqlite3.Error, OSError):
             return None
+
+    def context(self, thread_id, before=-1, after=-1):
+        """Bounded local message history with stable byte-offset cursors.
+
+        GUI count and private app-tools pipe versions do not affect this
+        read-only path. Both the index and the rollout header must identify
+        the exact desktop thread. Analysis and tool output are never exposed.
+        """
+        empty = {'items': [], 'more': False, 'newer': False}
+        record = self.thread(thread_id)
+        if not record:
+            return empty
+        try:
+            with Path(record['rollout_path']).open('rb') as stream:
+                header = json.loads(stream.readline(TAIL_BYTES))
+                if header.get('type') != 'session_meta' or header.get('payload', {}).get('id') != thread_id:
+                    return empty
+                first = stream.tell()
+                stream.seek(0, 2)
+                size = stream.tell()
+                end = min(size, before) if before >= 0 else size
+                start = max(first, after) if after >= 0 else max(first, end-TAIL_BYTES)
+                if start >= end:
+                    return empty
+                stream.seek(start)
+                if start > first:
+                    skipped = stream.readline(TAIL_BYTES)
+                    if skipped and not skipped.endswith(b'\n'):
+                        return empty
+                offset = stream.tell()
+                block = stream.read(min(TAIL_BYTES, max(0, end-offset)))
+                read_end = offset + len(block)
+            items = []
+            for line in block.splitlines(keepends=True):
+                cursor = offset
+                offset += len(line)
+                if not line.endswith(b'\n'):
+                    continue  # The app may still be appending this record.
+                try:
+                    event = json.loads(line)
+                except ValueError:
+                    continue
+                payload = event.get('payload') or {}
+                role = payload.get('role')
+                if (event.get('type') != 'response_item' or payload.get('type') != 'message' or
+                        role not in {'user', 'assistant'} or
+                        role == 'assistant' and payload.get('channel') not in {None, 'final'}):
+                    continue
+                text = '\n'.join(c.get('text', '') for c in payload.get('content', [])
+                                 if c.get('type') in {'text', 'input_text', 'output_text'})
+                if text and (before < 0 or cursor < before) and (after < 0 or cursor > after):
+                    items.append({'s': cursor, 'r': 'u' if role == 'user' else 'a', 'x': text[:1000]})
+            page = items[:8] if after >= 0 else items[-8:]
+            return {'items': page, 'more': bool(page and (start > first or page[0] != items[0])),
+                    'newer': bool(page and (read_end < size or page[-1] != items[-1]))}
+        except (OSError, ValueError, TypeError, AttributeError):
+            return empty
+
+    def completed_turn(self, thread_id):
+        """Latest completed turn of one exact desktop thread, read-only."""
+        record = self.thread(thread_id)
+        if not record:
+            return ''
+        try:
+            path = Path(record['rollout_path'])
+            with path.open('rb') as stream:
+                header = json.loads(stream.readline(TAIL_BYTES))
+                if header.get('type') != 'session_meta' or header.get('payload', {}).get('id') != thread_id:
+                    return ''
+                stream.seek(0, 2)
+                offset = max(0, stream.tell() - TAIL_BYTES)
+                stream.seek(offset)
+                if offset:
+                    stream.readline()
+                lines = stream.read(TAIL_BYTES).splitlines(keepends=True)
+            completion = ''
+            for line in lines:
+                if not line.endswith(b'\n'):
+                    continue
+                event = json.loads(line)
+                payload = event.get('payload', {})
+                if event.get('type') != 'event_msg':
+                    continue
+                kind = payload.get('type')
+                if kind in {'task_complete', 'turn_completed'}:
+                    token = payload.get('turn_id') or event.get('ordinal') or event.get('timestamp')
+                    completion = 'rollout:' + thread_id + ':' + str(token) if token else ''
+                elif kind in {'task_started', 'turn_started', 'turn_aborted', 'task_interrupted', 'error', 'turn_failed'}:
+                    completion = ''
+            return completion
+        except (OSError, ValueError, KeyError, TypeError):
+            return ''
 
     def read(self, limit=DEFAULT_LIMIT):
         root = self.home or Path(os.environ.get('CODEX_HOME') or Path.home() / '.codex')
@@ -199,9 +306,7 @@ class RecentActivities:
                 recency = [f'NULLIF({c},0)' + (' * 1000' if c.endswith('_at') else '')
                            for c in ('recency_at_ms', 'recency_at', 'updated_at_ms', 'updated_at') if c in columns]
                 order = 'COALESCE(' + ','.join(recency + ['0']) + ')'
-                filters = "archived=0 AND source IN ('vscode', 'desktop')"
-                if 'thread_source' in columns:
-                    filters += " AND (thread_source IS NULL OR thread_source='user')"
+                filters = _thread_filters(columns)
                 candidates = db.execute(f'SELECT * FROM threads WHERE {filters} ORDER BY {order} DESC, id DESC')
                 history_path = _database(root, 'thread_history')
                 history = None
@@ -230,7 +335,7 @@ class RecentActivities:
                         last_activity = _date(data.get('updated_at_ms'), True) or _date(data['updated_at'])
                         if turn_time and (last_activity is None or turn_time > last_activity):
                             last_activity = turn_time
-                        rows.append({'thread_id': data['id'], 'title': data['title'], 'cwd': data['cwd'],
+                        rows.append({'thread_id': data['id'], 'title': _display_title(data), 'cwd': data['cwd'],
                                      'status': status, 'updated_utc': last_activity,
                                      'model': data.get('model') or '', 'effort': data.get('reasoning_effort') or ''})
                         if len(rows) >= limit:

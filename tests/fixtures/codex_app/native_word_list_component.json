@@ -1,0 +1,506 @@
+{
+  "kind": "ListItemControl",
+  "name": "One is the multiplicative identity, meaning multiplication by it leaves a number unchanged. It is neither prime nor composite because it has only one positive divisor.",
+  "id": "",
+  "class": "_ListItem_176oq_2",
+  "enabled": true,
+  "offscreen": false,
+  "runtime": [
+    42,
+    985674,
+    4,
+    32,
+    1,
+    42957
+  ],
+  "value": null,
+  "children": [
+    {
+      "kind": "TextControl",
+      "name": "1. ",
+      "id": "",
+      "class": "",
+      "enabled": true,
+      "offscreen": false,
+      "runtime": [
+        42,
+        985674,
+        4,
+        32,
+        1,
+        42960
+      ],
+      "value": null,
+      "children": []
+    },
+    {
+      "kind": "TextControl",
+      "name": "One ",
+      "id": "",
+      "class": "",
+      "enabled": true,
+      "offscreen": false,
+      "runtime": [
+        42,
+        985674,
+        4,
+        32,
+        1,
+        42961
+      ],
+      "value": null,
+      "children": []
+    },
+    {
+      "kind": "TextControl",
+      "name": "is ",
+      "id": "",
+      "class": "",
+      "enabled": true,
+      "offscreen": false,
+      "runtime": [
+        42,
+        985674,
+        4,
+        32,
+        1,
+        42968
+      ],
+      "value": null,
+      "children": []
+    },
+    {
+      "kind": "TextControl",
+      "name": "the ",
+      "id": "",
+      "class": "",
+      "enabled": true,
+      "offscreen": false,
+      "runtime": [
+        42,
+        985674,
+        4,
+        32,
+        1,
+        42973
+      ],
+      "value": null,
+      "children": []
+    },
+    {
+      "kind": "TextControl",
+      "name": "multiplicative ",
+      "id": "",
+      "class": "",
+      "enabled": true,
+      "offscreen": false,
+      "runtime": [
+        42,
+        985674,
+        4,
+        32,
+        1,
+        42977
+      ],
+      "value": null,
+      "children": []
+    },
+    {
+      "kind": "TextControl",
+      "name": "identity, ",
+      "id": "",
+      "class": "",
+      "enabled": true,
+      "offscreen": false,
+      "runtime": [
+        42,
+        985674,
+        4,
+        32,
+        1,
+        42993
+      ],
+      "value": null,
+      "children": []
+    },
+    {
+      "kind": "TextControl",
+      "name": "meaning ",
+      "id": "",
+      "class": "",
+      "enabled": true,
+      "offscreen": false,
+      "runtime": [
+        42,
+        985674,
+        4,
+        32,
+        1,
+        42999
+      ],
+      "value": null,
+      "children": []
+    },
+    {
+      "kind": "TextControl",
+      "name": "multiplication ",
+      "id": "",
+      "class": "",
+      "enabled": true,
+      "offscreen": false,
+      "runtime": [
+        42,
+        985674,
+        4,
+        32,
+        1,
+        43002
+      ],
+      "value": null,
+      "children": []
+    },
+    {
+      "kind": "TextControl",
+      "name": "by ",
+      "id": "",
+      "class": "",
+      "enabled": true,
+      "offscreen": false,
+      "runtime": [
+        42,
+        985674,
+        4,
+        32,
+        1,
+        43009
+      ],
+      "value": null,
+      "children": []
+    },
+    {
+      "kind": "TextControl",
+      "name": "it ",
+      "id": "",
+      "class": "",
+      "enabled": true,
+      "offscreen": false,
+      "runtime": [
+        42,
+        985674,
+        4,
+        32,
+        1,
+        43017
+      ],
+      "value": null,
+      "children": []
+    },
+    {
+      "kind": "TextControl",
+      "name": "leaves ",
+      "id": "",
+      "class": "",
+      "enabled": true,
+      "offscreen": false,
+      "runtime": [
+        42,
+        985674,
+        4,
+        32,
+        1,
+        43018
+      ],
+      "value": null,
+      "children": []
+    },
+    {
+      "kind": "TextControl",
+      "name": "a ",
+      "id": "",
+      "class": "",
+      "enabled": true,
+      "offscreen": false,
+      "runtime": [
+        42,
+        985674,
+        4,
+        32,
+        1,
+        43026
+      ],
+      "value": null,
+      "children": []
+    },
+    {
+      "kind": "TextControl",
+      "name": "number ",
+      "id": "",
+      "class": "",
+      "enabled": true,
+      "offscreen": false,
+      "runtime": [
+        42,
+        985674,
+        4,
+        32,
+        1,
+        43027
+      ],
+      "value": null,
+      "children": []
+    },
+    {
+      "kind": "TextControl",
+      "name": "unchanged. ",
+      "id": "",
+      "class": "",
+      "enabled": true,
+      "offscreen": false,
+      "runtime": [
+        42,
+        985674,
+        4,
+        32,
+        1,
+        43032
+      ],
+      "value": null,
+      "children": []
+    },
+    {
+      "kind": "TextControl",
+      "name": "It ",
+      "id": "",
+      "class": "",
+      "enabled": true,
+      "offscreen": false,
+      "runtime": [
+        42,
+        985674,
+        4,
+        32,
+        1,
+        43042
+      ],
+      "value": null,
+      "children": []
+    },
+    {
+      "kind": "TextControl",
+      "name": "is ",
+      "id": "",
+      "class": "",
+      "enabled": true,
+      "offscreen": false,
+      "runtime": [
+        42,
+        985674,
+        4,
+        32,
+        1,
+        43043
+      ],
+      "value": null,
+      "children": []
+    },
+    {
+      "kind": "TextControl",
+      "name": "neither ",
+      "id": "",
+      "class": "",
+      "enabled": true,
+      "offscreen": false,
+      "runtime": [
+        42,
+        985674,
+        4,
+        32,
+        1,
+        43044
+      ],
+      "value": null,
+      "children": []
+    },
+    {
+      "kind": "TextControl",
+      "name": "prime ",
+      "id": "",
+      "class": "",
+      "enabled": true,
+      "offscreen": false,
+      "runtime": [
+        42,
+        985674,
+        4,
+        32,
+        1,
+        43053
+      ],
+      "value": null,
+      "children": []
+    },
+    {
+      "kind": "TextControl",
+      "name": "nor ",
+      "id": "",
+      "class": "",
+      "enabled": true,
+      "offscreen": false,
+      "runtime": [
+        42,
+        985674,
+        4,
+        32,
+        1,
+        43054
+      ],
+      "value": null,
+      "children": []
+    },
+    {
+      "kind": "TextControl",
+      "name": "composite ",
+      "id": "",
+      "class": "",
+      "enabled": true,
+      "offscreen": false,
+      "runtime": [
+        42,
+        985674,
+        4,
+        32,
+        1,
+        43055
+      ],
+      "value": null,
+      "children": []
+    },
+    {
+      "kind": "TextControl",
+      "name": "because ",
+      "id": "",
+      "class": "",
+      "enabled": true,
+      "offscreen": false,
+      "runtime": [
+        42,
+        985674,
+        4,
+        32,
+        1,
+        43063
+      ],
+      "value": null,
+      "children": []
+    },
+    {
+      "kind": "TextControl",
+      "name": "it ",
+      "id": "",
+      "class": "",
+      "enabled": true,
+      "offscreen": false,
+      "runtime": [
+        42,
+        985674,
+        4,
+        32,
+        1,
+        43069
+      ],
+      "value": null,
+      "children": []
+    },
+    {
+      "kind": "TextControl",
+      "name": "has ",
+      "id": "",
+      "class": "",
+      "enabled": true,
+      "offscreen": false,
+      "runtime": [
+        42,
+        985674,
+        4,
+        32,
+        1,
+        43070
+      ],
+      "value": null,
+      "children": []
+    },
+    {
+      "kind": "TextControl",
+      "name": "only ",
+      "id": "",
+      "class": "",
+      "enabled": true,
+      "offscreen": false,
+      "runtime": [
+        42,
+        985674,
+        4,
+        32,
+        1,
+        43074
+      ],
+      "value": null,
+      "children": []
+    },
+    {
+      "kind": "TextControl",
+      "name": "one ",
+      "id": "",
+      "class": "",
+      "enabled": true,
+      "offscreen": false,
+      "runtime": [
+        42,
+        985674,
+        4,
+        32,
+        1,
+        43084
+      ],
+      "value": null,
+      "children": []
+    },
+    {
+      "kind": "TextControl",
+      "name": "positive ",
+      "id": "",
+      "class": "",
+      "enabled": true,
+      "offscreen": false,
+      "runtime": [
+        42,
+        985674,
+        4,
+        32,
+        1,
+        43085
+      ],
+      "value": null,
+      "children": []
+    },
+    {
+      "kind": "TextControl",
+      "name": "divisor.",
+      "id": "",
+      "class": "",
+      "enabled": true,
+      "offscreen": false,
+      "runtime": [
+        42,
+        985674,
+        4,
+        32,
+        1,
+        43086
+      ],
+      "value": null,
+      "children": []
+    }
+  ],
+  "source": "_e2e_scratch\\control-030-complete-validation\\native-retry-hardware-basic-20261007.json"
+}

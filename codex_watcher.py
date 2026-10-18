@@ -1,7 +1,7 @@
 """Independent Codex watcher, sharing only the GUI's serialized worker thread."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal, pyqtSlot
@@ -81,6 +81,8 @@ class State:
     submit_reason: str = ""
     thread_id: str = ""
     thread_hint: str = ""
+    continued_completion: str = ""
+    continued_text: str = ""
 
 
 class CodexWatcher(QObject):
@@ -99,6 +101,8 @@ class CodexWatcher(QObject):
         self.config = clean_config({})
         self.states: dict[int, State] = {}
         self.session_bindings = {}
+        self.primary_windows = {}
+        self.thread_states = {}
         self.latest_rows = []
         self.activities = RecentActivities() if provider == "codex_app" else None
         self.running = False
@@ -130,6 +134,8 @@ class CodexWatcher(QObject):
             self.driver.auto.InitializeUIAutomationInCurrentThread()
             self._uia_initialized = True
         self.states.clear()
+        self.primary_windows.clear()
+        self.thread_states.clear()
         self.running = True
         self.running_changed.emit(True)
         self.timer.start()
@@ -182,11 +188,15 @@ class CodexWatcher(QObject):
         st.submission = None
         st.last_sent = now
         st.status = "sent"
-        prefix = "[dry-run] " if self.config["dry_run"] else ""
-        confirmation = "; submission confirmed" if self.provider == "codex_app" and not self.config["dry_run"] else ""
+        dry_run=self.config['dry_run'] and not action.startswith('companion')
+        prefix = "[dry-run] " if dry_run else ""
+        confirmation = "; submission confirmed" if self.provider == "codex_app" and not dry_run else ""
         self.log.emit("fire", f"{prefix}Codex #{st.hwnd:x}: {reason}{confirmation}")
         st.seen_running = False
         st.idle_since = None
+        service = getattr(self, "control_service", None)
+        if service and action.startswith("companion"):
+            service.confirmed_native(st)
         if action == "quota":
             st.consumed_quota = st.quota_id
             st.reset_utc = None
@@ -195,7 +205,9 @@ class CodexWatcher(QObject):
         elif action == "retry":
             st.retry_sent = now
             st.retry_attempts += 1
-        elif action == "after_finish" and not self.config["dry_run"]:
+        elif action in {"after_finish","companion_after_finish"} and not dry_run:
+            st.continued_completion=st.completion_id or st.screen.completion_id
+            st.continued_text=self._options(st)['after_finish']
             left = self._options(st)["loops"]
             if left > 0:
                 if st.thread_id:
@@ -224,12 +236,16 @@ class CodexWatcher(QObject):
             self.log.emit("warn", "Codex session binding held; refresh and open the exact session first")
             return
         self.session_bindings[hwnd] = (view.identity, view.thread_hint, data["id"])
+        self.primary_windows[data['id']] = hwnd
         self.states[hwnd] = State(hwnd, window.Name, identity=view.identity,
                                   thread_id=data["id"], thread_hint=view.thread_hint,
                                   screen=view.screen, read_at=st.read_at)
         self._publish()
 
     def _send(self, st, window, text, now, reason, action="") -> bool:
+        if (self.provider == 'codex_app' and st.thread_id and
+                self.primary_windows.get(st.thread_id, st.hwnd) != st.hwnd):
+            return False
         if st.submission is not None:
             return False
         prepare = getattr(self.driver, "prepare", None)
@@ -237,19 +253,26 @@ class CodexWatcher(QObject):
             prepare(window, st.identity)
         if self.provider == "codex_app":
             window.expected_thread_hint = st.thread_hint
+            window.expected_thread_id = st.thread_id
         # The Codex driver performs its own last-moment screen/focus checks.
+        dry_run = self.config['dry_run'] and not action.startswith('companion')
         options = self._options(st)
         permissions = getattr(self.driver, "apply_session_permissions", None)
-        if permissions and not self.config["dry_run"]:
+        service = getattr(self, "control_service", None)
+        if service and self.provider == "codex" and service.native_cli_owned():
+            st.status = "rpc_controlled"
+            return False
+        owned_window = bool(service and self.provider == 'codex_app' and service.native_window_owned(st.hwnd))
+        if permissions and not dry_run and not (service and (service.owns(st.thread_id,self.provider) or owned_window)):
             if not permissions(window, self.config["permission_mode"]):
                 self.log.emit("warn", f"Codex #{st.hwnd:x}: permissions could not be applied; continue held")
                 return False
         model, effort = options["model"], options["effort"]
-        if (model or effort) and not self.config["dry_run"]:
+        if (model or effort) and not dry_run:
             if not self.driver.apply_session_options(window, model, effort):
                 self.log.emit("warn", f"Codex #{st.hwnd:x}: session model / effort could not be applied; continue held")
                 return False
-        outcome = self.driver.send_prompt(window, text, dry_run=self.config["dry_run"])
+        outcome = self.driver.send_prompt(window, text, dry_run=dry_run)
         if getattr(outcome, "submission", None) is not None:
             st.submission = outcome.submission
             st.submit_reason, st.submit_action = reason, action
@@ -257,7 +280,8 @@ class CodexWatcher(QObject):
             self.log.emit("info", f"Codex #{st.hwnd:x}: own prompt staged; waiting for native Send and submission confirmation")
             return False
         if not outcome:
-            self.log.emit("warn", f"Codex #{st.hwnd:x}: {reason} held (draft, menu, running, unreadable, or focus)")
+            detail = getattr(outcome, 'detail', '') or 'draft, menu, running, unreadable, or focus'
+            self.log.emit("warn", f"Codex #{st.hwnd:x}: {reason} held ({detail})")
             return False
         # Permission/model pickers can take several seconds. Cooldown starts
         # after actual submission, rather than before those native actions.
@@ -271,6 +295,7 @@ class CodexWatcher(QObject):
         self._refresh_recent_activities()
         now = self.now()
         seen = set()
+        observed = []
         try:
             handles = self.driver.terminal_handles()
         except Exception as exc:
@@ -298,6 +323,16 @@ class CodexWatcher(QObject):
                     continue
                 title = window.Name or f"Codex #{hwnd:x}"
                 identity = self.driver.session_key(window, text) if hasattr(self.driver, "session_key") else ""
+                if self.provider == 'codex_app' and not identity:
+                    # React can temporarily unmount the native composer. That
+                    # is unreadable state, not proof of a different chat.
+                    # Preserve the exact pending receipt and continuation arm;
+                    # observation and mutations resume only after identity reads.
+                    st = self.states.get(hwnd)
+                    if st is not None:
+                        st.blind = True
+                        st.status = 'unknown'
+                    continue
                 thread_id = self.activities.thread_id_for_title(title) if self.activities is not None else ""
                 thread_hint = getattr(text, "thread_hint", "")
                 binding = self.session_bindings.get(hwnd)
@@ -315,17 +350,73 @@ class CodexWatcher(QObject):
                 st.thread_id = thread_id
                 st.thread_hint = thread_hint
                 st.title, st.screen, st.read_at, st.blind = title, screen, now, False
-                self._observe(st, window, now)
+                observed.append((st, window))
             except Exception as exc:
                 self.log.emit("warn", f"Codex #{hwnd:x}: {type(exc).__name__}: {exc}")
+        if self.provider == 'codex_app':
+            observed = self._one_window_per_thread(observed)
+        for st, window in observed:
+            try:
+                self._observe(st, window, now)
+            except Exception as exc:
+                self.log.emit('warn', f'Codex #{st.hwnd:x}: {type(exc).__name__}: {exc}')
         for hwnd in list(self.states):
             if hwnd not in seen and not self.driver.window_exists(hwnd):
                 self.states.pop(hwnd, None)
                 self.session_bindings.pop(hwnd, None)
         self._publish()
 
+    def _one_window_per_thread(self, observed):
+        """Read every GUI, but automate each full thread once per poll.
+
+        Selection survives z-order changes. A live but switched/unreadable
+        primary holds its mirrors. A closed primary can transfer cooldowns to
+        a mirror only when no native submission receipt remains uncertain.
+        """
+        groups, selected = {}, []
+        for st, window in observed:
+            if not st.thread_id:
+                selected.append((st, window))
+            else:
+                groups.setdefault(st.thread_id, []).append((st, window))
+        service = getattr(self, 'control_service', None)
+        for tid, members in groups.items():
+            bound = service.native.get(tid) if service and tid in service.bound else None
+            primary = bound[0] if bound else self.primary_windows.get(tid)
+            chosen = next((item for item in members if item[0].hwnd == primary), None)
+            prior = self.thread_states.get(tid)
+            if chosen is None and (bound or primary and
+                    (self.driver.window_exists(primary) or prior and prior.submission is not None)):
+                for st, _ in members:
+                    st.status = 'held'
+                continue
+            if chosen is None:
+                chosen = min(members, key=lambda item: item[0].hwnd)
+                st, window = chosen
+                if prior is not None:
+                    st = replace(prior, hwnd=st.hwnd, title=st.title, identity=st.identity,
+                                 thread_hint=st.thread_hint, screen=st.screen,
+                                 read_at=st.read_at, blind=False)
+                    self.states[st.hwnd] = st
+                    chosen = st, window
+            self.primary_windows[tid] = chosen[0].hwnd
+            self.thread_states[tid] = chosen[0]
+            selected.append(chosen)
+        return selected
+
     def _observe(self, st, window, now):
         screen = st.screen
+        completed = getattr(self.activities, 'completed_turn', None)
+        if self.provider == 'codex_app' and st.thread_id and completed:
+            stamp = completed(st.thread_id)
+            if stamp:
+                # UIA can keep an older virtualized message list. Exact local
+                # turn records also detect a fast completion between polls.
+                screen = st.screen = replace(screen, completion_id=stamp)
+        service = getattr(self, "control_service", None)
+        if service and "codex:desktop:" + st.thread_id in service.paused:
+            st.status = "attention"
+            return
         options = self._options(st)
         if not st.initialized:
             st.completion_id = screen.completion_id
@@ -337,12 +428,18 @@ class CodexWatcher(QObject):
             st.idle_since = None
             return
         if screen.permission:
-            if self.config["auto_approve"] and not self.config["dry_run"] and not (screen.draft or screen.running):
+            service = getattr(self, "control_service", None)
+            controlled = bool(service and (service.owns(st.thread_id,self.provider)
+                or self.provider == 'codex_app' and service.native_window_owned(st.hwnd)
+                or self.provider == "codex" and service.native_cli_owned()))
+            identified_thread = self.provider != 'codex_app' or bool(st.thread_id)
+            if self.config["auto_approve"] and identified_thread and not controlled and not self.config["dry_run"] and not (screen.draft or screen.running):
                 prepare = getattr(self.driver, "prepare", None)
                 if prepare:
                     prepare(window, st.identity)
                 if self.provider == "codex_app":
                     window.expected_thread_hint = st.thread_hint
+                    window.expected_thread_id = st.thread_id
                 approve = getattr(self.driver, "approve_permission", None)
                 if approve and approve(window):
                     st.status = "approved"
@@ -364,7 +461,10 @@ class CodexWatcher(QObject):
                 prepare(window, st.identity)
             if self.provider == "codex_app":
                 window.expected_thread_hint = st.thread_hint
+                window.expected_thread_id = st.thread_id
             due = st.reset_utc is None or now >= st.reset_utc + timedelta(seconds=self.config["buffer"])
+            if st.submit_action.startswith('companion') and getattr(st.submission, 'invoked_at', None) is not None:
+                due = False  # The explicit operation invokes native Send at most once.
             outcome = self.driver.poll_submission(window, st.submission, retry_seconds=self.config["retry"], allow_click=due)
             if outcome:
                 self._sent(st, now, st.submit_reason, st.submit_action)
@@ -450,7 +550,17 @@ class CodexWatcher(QObject):
 
     def _publish(self):
         rows = []
-        for st in self.states.values():
+        states = list(self.states.values())
+        if self.provider == 'codex_app':
+            groups = {}
+            for st in states:
+                if st.thread_id:
+                    groups.setdefault(st.thread_id, []).append(st)
+            states = [st for st in states if not st.thread_id]
+            for tid, members in groups.items():
+                states.append(next((st for st in members if st.hwnd == self.primary_windows.get(tid)),
+                                   min(members, key=lambda st: st.hwnd)))
+        for st in states:
             s = st.screen
             options = self._options(st)
             rows.append({"hwnd": st.hwnd, "title": st.title, "provider": self.provider,
@@ -459,7 +569,8 @@ class CodexWatcher(QObject):
                          "model": options["model"], "effort": options["effort"],
                          "thread_id": st.thread_id,
                          "identity": st.identity, "thread_hint": st.thread_hint,
-                         "current_model": s.model, "current_effort": s.effort, "tabs": 1,
+                         "current_model": s.model, "current_effort": s.effort,
+                         "tabs": len(groups[st.thread_id]) if self.provider == 'codex_app' and st.thread_id else 1,
                          "excluded": options["excluded"],
                          "title_key": st.title, "running": s.running,
                          "prompt": {"kind": "codex_menu"} if s.blocked else None,

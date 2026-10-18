@@ -1,0 +1,20 @@
+{
+  "kind": "TextControl",
+  "name": "你在 0秒 后停止了",
+  "id": "",
+  "class": "",
+  "enabled": true,
+  "offscreen": true,
+  "runtime": [
+    42,
+    12325712,
+    4,
+    204,
+    1,
+    94819
+  ],
+  "value": null,
+  "children": [],
+  "source": "_e2e_scratch/control-030-complete-validation/native-stopped-20261006.json",
+  "observed_after_actual_watch_stop": true
+}

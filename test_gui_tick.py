@@ -88,11 +88,16 @@ def _send_lines(w, lines, dry_run=False):
 
 
 gui.find_terminal_windows = lambda: WINDOWS
+# The API looks its one window up by handle instead of listing the desktop;
+# in here that is the same fake list.
+gui.terminal_window_from_handle = lambda h: next(
+    (w for w in WINDOWS if int(w.NativeWindowHandle) == int(h)), None)
 gui.read_terminal_text = lambda w: TEXTS.get(int(w.NativeWindowHandle), "")
 gui.send_text_lines = _send_lines
 gui.send_keys = lambda w, k, dry_run=False: True
 gui.send_continue = lambda w, dry_run=False: _send_lines(w, ["continue"])
 gui.list_tab_titles = lambda w: []
+gui._ENUM_RETRY_WAIT_S = 0   # the in-pass re-list must not slow the suite
 
 
 def new_watcher():
@@ -458,6 +463,29 @@ try:
     w._tick()
     check("F7 and reported once, not once per tick",
           not any("missing from this pass" in m for _, m in LOGS_F))
+
+    # ...and a hiccup that has passed two seconds later costs nothing at all:
+    # the pass lists the windows again and carries on with the full set.
+    _calls = []
+
+    def _flaky():
+        _calls.append(1)
+        return [] if len(_calls) == 1 else [FakeWin(7, "win")]
+
+    w2 = _ghost_watcher()
+    LOGS_F.clear()
+    _real_find = gui.find_terminal_windows
+    gui.find_terminal_windows = _flaky
+    try:
+        _calls.clear()
+        w2._tick()
+    finally:
+        gui.find_terminal_windows = _real_find
+    check("F7b a window missing from the first look is looked for again, "
+          "within the same pass", len(_calls) == 2)
+    check("F7c found again, it is processed as normal and not reported "
+          "missing", not any("missing from this pass" in m for _, m in LOGS_F)
+          and 7 in w2._states)
 
     # A queued row command must survive the same hiccup: the window is still
     # there to receive it.
@@ -1147,6 +1175,48 @@ check("V11 dry-run's own log line keeps the words out too",
       len(_dry) == 1 and "音频" not in _dry[0] and "<6 chars>" in _dry[0])
 w.set_dry_run(False)
 
+# Text typed after an unsent draft is submitted with it as one message
+# (2026-09-27: a companion's preset went out as the tail of a half sentence).
+# A draft is the user's: nothing typed, nothing cleared, the caller told.
+SENT.clear()
+LOGS_V.clear()
+TEXTS[31] = "earlier output\n> an old prompt echo\n❯\xa0half a sentence"
+_out = _q.Queue(1)
+w.api_send(31, ["summarise progress"], _out)
+check("V15 a send onto a draft is refused as 'draft'",
+      _out.get_nowait() == {"ok": False, "reason": "draft"})
+check("V16 and nothing is typed, so the draft is left as it was",
+      SENT == [])
+check("V17 the log says why, without quoting the draft",
+      any("not typed" in m and "half a sentence" not in m for _, m in LOGS_V))
+TEXTS[31] = "earlier output\n> an old prompt echo\n❯\xa0"
+_out = _q.Queue(1)
+w.api_send(31, ["summarise progress"], _out)
+check("V18 an empty box takes the send, and an old prompt echo above is "
+      "not mistaken for a draft",
+      _out.get_nowait() == {"ok": True}
+      and SENT == [(31, ["summarise progress"])])
+TEXTS[31] = IDLE
+
+# A spec uiautomation cannot press is refused before the window is touched,
+# and named as such -- 'foreground' would tell the caller to try again.
+_pressed = []
+_real_keys_v = gui.send_keys
+gui.send_keys = lambda w, k, dry_run=False: _pressed.append(k) or True
+try:
+    _out = _q.Queue(1)
+    w.api_keys(31, "{Backspace}", _out)
+    _r = _out.get_nowait()
+    check("V12 an unknown key name is answered bad_keyspec, naming it",
+          _r == {"ok": False, "reason": "bad_keyspec", "key": "{Backspace}"})
+    check("V13 and the window is not touched at all", _pressed == [])
+    _out = _q.Queue(1)
+    w.api_keys(31, "{Back}", _out)
+    check("V14 while the real name goes through",
+          _out.get_nowait() == {"ok": True} and _pressed == ["{Back}"])
+finally:
+    gui.send_keys = _real_keys_v
+
 # =============================================================================
 print("---- X: the snapshot says what a window is waiting on ----")
 # A companion program showing "this session needs you" reads this field. It
@@ -1248,6 +1318,57 @@ check("Y9 a rescan picks up a renamed window straight away",
       row["title"] == "✳ a completely new title")
 check("Y10 and title_key follows it",
       row["title_key"] == "a completely new title")
+
+# The LIST must follow a rescan too, and before the rescan answers. /windows
+# served the last pass's rows, so a caller that rescanned and then listed was
+# told a prompt was there, then that it was not, for up to a pass (Claude
+# Control, 2026-09-27: its approval page reopened every few seconds).
+reset([(52, "win")], {52: IDLE})
+w = new_watcher()
+w._tick()
+_seen_at_answer = []
+
+
+class _Peek:
+    """An out-queue that looks at the published rows when the answer lands."""
+    def put(self, r):
+        _seen_at_answer.append((r, [dict(x) for x in (w.latest_rows or [])]))
+
+
+TEXTS[52] = CHOOSE
+w.api_scan(52, _Peek())
+_r, _rows_then = _seen_at_answer[-1]
+check("Y11 a rescan's prompt is already in the published rows when it "
+      "answers", _r["ok"] and _rows_then
+      and _rows_then[0]["prompt"] is not None)
+_host_y = gui.MainWindow.__new__(gui.MainWindow)
+_host_y.worker = w
+_host_y.codex_service = None  # Explicit fixture state; Qt __init__ is not run.
+_host_y._latest_snapshot = []               # the GUI copy lags; not used
+_listed = gui.MainWindow._api_snapshot(_host_y)["windows"]
+check("Y12 so /windows says what the rescan said",
+      _listed and _listed[0]["prompt"] is not None)
+check("Y13 every row says when its screen was read",
+      _listed[0]["read_utc"] == FakeDT._now.isoformat())
+
+# A rescan of a window this tool once typed into carried a raw datetime and
+# could not be turned into JSON, so the caller got no reply (2026-09-27).
+import json as _jy
+_st = w._states[52]
+_st.last_sent_utc = FakeDT._now
+_host_y._api_last_scan = {}
+_host_y.sig_api_wake = type("W", (), {"emit": staticmethod(w.api_drain)})()
+_host_y._api_last_send = {}
+_resp = gui.MainWindow._api_do_scan(_host_y, 52)
+try:
+    _js = _jy.dumps(_resp)
+except TypeError:
+    _js = None
+check("Y14 a rescan of a window that was once sent to is valid JSON",
+      _js is not None and _resp["window"]["last_sent_utc"]
+      == FakeDT._now.isoformat())
+check("Y15 and so is the list", _jy.dumps(
+    gui.MainWindow._api_snapshot(_host_y)) is not None)
 
 # =============================================================================
 print("---- Z2: the one API route that changes the user's settings ----")
@@ -1382,6 +1503,365 @@ check("Z3d the kept buffer agrees too, so a theme flip cannot reveal it",
       [lvl for _, lvl, _ in _q4._log_buffer] == ["fire", "fire"])
 check("Z3e and the ONLY difference is the balloon",
       len(_q4.tray.shown) == 1 and _q4.tray.shown[0][1] == "loud one")
+
+# =============================================================================
+print("---- QT: a quick turn between passes is still a recovery ----")
+# 2026-09-25: a session waiting on background shells answered the 'continue'
+# in 29 seconds — between two passes — and went quiet again on purpose. With
+# running never caught, the error stayed "current" and it was poked again ten
+# minutes later for nothing.
+_R = "─" * 60
+ERR_ONLY = chr(10).join([ECONN, "", "  ✻ Worked for 3m · done 10:43", "",
+                         _R, "❯ ", _R])
+ANSWERED = chr(10).join([ECONN, "", "  ✻ Worked for 3m · done 10:43", "",
+                         "> continue", "",
+                         "● still at gate 1, waiting on the chain", "",
+                         "  ✻ Cogitated for 29s · done 10:44 · 2 shells running",
+                         "", _R, "❯ ", _R])
+set_now(T0)
+reset([(42, "win")], {42: ERR_ONLY})
+w = new_watcher()
+LOGS_QT = []
+w.log.connect(lambda k, m: LOGS_QT.append((k, m)))
+w._tick()
+check("QT1 the stuck session is poked once", SENT == [(42, ["continue"])])
+SENT.clear()
+TEXTS[42] = ANSWERED                      # it answered and finished, unseen
+advance(60)
+w._tick()
+check("QT2 the finished turn is read as recovery",
+      any("cleared" in m for _, m in LOGS_QT)
+      and not w._states[42].retry_active)
+advance(w._retry_interval + 60)
+w._tick()
+check("QT3 and it is NOT poked again a retry interval later", not SENT)
+
+# =============================================================================
+print("---- SA: a view scrolled away from the live bottom is not acted on ----")
+# Captured 2026-09-25: a session hard at work, its view scrolled up inside
+# Claude Code. The rows on show held an OLD network error and nothing after it
+# (the spinner and prompt box are simply not drawn while scrolled), with the
+# "Jump to bottom" hint where they would be. That read as stuck, and
+# 'continue' would have been typed into a turn in flight.
+_RULE = "─" * 60
+SCROLLED = chr(10).join([
+    ECONN, "", "  ✻ Crunched for 18m 51s · done 9:50", "",
+    "● Picking up round 82. I'm writing the docs now.",
+    "  Made 1 scratchpad edit, ran 1 shell command",
+    "                                 Jump to bottom (ctrl+End) ↓",
+    _RULE])
+AT_BOTTOM_STUCK = chr(10).join([ECONN, "", "  ✻ Crunched for 18m 51s · done 9:50",
+                                "", _RULE, "❯ ", _RULE])
+set_now(T0)
+reset([(41, "win")], {41: SCROLLED})
+w = new_watcher()
+LOGS_SA = []
+w.log.connect(lambda k, m: LOGS_SA.append((k, m)))
+w._tick()
+check("SA1 an old error seen while scrolled away types nothing", not SENT)
+check("SA2 and says why, once",
+      sum(1 for _, m in LOGS_SA if "scrolled up" in m) == 1)
+advance(700)
+w._tick()
+check("SA3 still scrolled a retry interval later: still nothing, and no "
+      "second announcement",
+      not SENT and sum(1 for _, m in LOGS_SA if "scrolled up" in m) == 1)
+check("SA4 its state is kept while it is out of sight", 41 in w._states)
+TEXTS[41] = AT_BOTTOM_STUCK                     # the view is back at the bottom
+advance(60)
+w._tick()
+check("SA5 back at the bottom it is announced",
+      any("back at the bottom" in m for _, m in LOGS_SA))
+check("SA6 and a genuinely stuck session there is poked as usual",
+      SENT == [(41, ["continue"])])
+SENT.clear()
+
+# Left scrolled, a window is skipped for good. After the set time (default
+# 60 min) it gets Claude Code's own jump-to-bottom key — verified on a live
+# ccdebug session 2026-09-27: PageUp showed the hint, Ctrl+End removed it,
+# and nothing was typed into the input box.
+KEYS_SB = []
+_real_keys = gui.send_keys
+gui.send_keys = lambda w, k, dry_run=False: (
+    KEYS_SB.append((int(w.NativeWindowHandle), k, dry_run)) or True)
+try:
+    set_now(T0)
+    reset([(43, "win")], {43: SCROLLED})
+    w = new_watcher()
+    LOGS_SB = []
+    w.log.connect(lambda k, m: LOGS_SB.append((k, m)))
+    w._tick()
+    advance(59 * 60)
+    w._tick()
+    check("SB1 under an hour scrolled up: left alone", KEYS_SB == [])
+    advance(2 * 60)
+    w._tick()
+    check("SB2 past the hour: exactly one Ctrl+End, to that window",
+          KEYS_SB == [(43, gui.SCROLL_TO_BOTTOM_KEYS, False)])
+    check("SB3 recorded as a keystroke, without a tray balloon",
+          any(k == "fire-quiet" and "back to the bottom" in m
+              for k, m in LOGS_SB))
+    advance(60)
+    w._tick()
+    check("SB4 still showing scrolled a minute later: not repeated at once",
+          len(KEYS_SB) == 1)
+    TEXTS[43] = AT_BOTTOM_STUCK
+    advance(60)
+    w._tick()
+    check("SB5 once it is at the bottom the clock is cleared",
+          w._states[43].scrolled_since is None)
+    # 0 = never
+    KEYS_SB.clear()
+    set_now(T0)
+    reset([(44, "win")], {44: SCROLLED})
+    w = new_watcher()
+    w.set_scroll_back(0)
+    w._tick()
+    advance(5 * 3600)
+    w._tick()
+    check("SB6 set to 0 it never scrolls a window back", KEYS_SB == [])
+    # dry-run types nothing for real
+    KEYS_SB.clear()
+    set_now(T0)
+    reset([(45, "win")], {45: SCROLLED})
+    w = new_watcher()
+    w.set_dry_run(True)
+    w._tick()
+    advance(61 * 60)
+    w._tick()
+    check("SB7 dry-run passes dry_run through, so nothing is really sent",
+          KEYS_SB == [(45, gui.SCROLL_TO_BOTTOM_KEYS, True)])
+finally:
+    gui.send_keys = _real_keys
+
+# =============================================================================
+print("---- AQ: busy from the local API means nothing was done ----")
+# Found by a companion's test window on 2026-09-27: a send timed out into
+# "busy" while its signal stayed queued, the watcher typed it once the pass
+# ended, the caller retried as busy invites, and the text went in twice --
+# the second Enter approving a permission prompt the first had raised.
+import threading as _thq                                    # noqa: E402
+import time as _tq                                          # noqa: E402
+
+
+class _Wake:
+    """sig_api_wake stand-in: what the watcher does when woken."""
+    def __init__(self, fn=None): self.fn = fn
+    def emit(self):
+        if self.fn:
+            self.fn()
+
+
+def _api_host(worker, wake=None):
+    mw = gui.MainWindow.__new__(gui.MainWindow)
+    mw.worker = worker
+    mw.codex_service = None
+    mw._api_last_send = {}
+    mw.sig_api_wake = _Wake(wake)
+    return mw
+
+
+_real_to, _real_started = gui.local_api.SEND_TIMEOUT_S, \
+    gui.local_api.STARTED_WAIT_S
+gui.local_api.SEND_TIMEOUT_S = 0.2
+_real_send_aq = gui.send_text_lines
+try:
+    set_now(T0)
+    reset([(71, "win")], {71: IDLE})
+    w = new_watcher()
+    # A watcher stuck in a long pass: woken, but it does not get there.
+    mw = _api_host(w, wake=None)
+    r = gui.MainWindow._api_do_send(mw, 71, ["hello"])
+    check("AQ1 an action not reached in time is answered busy",
+          r == {"ok": False, "reason": "busy"})
+    w.api_drain()           # the pass ends and the watcher reaches the queue
+    w._tick()
+    check("AQ2 and it is NOT typed later, once the watcher gets there",
+          not any(h == 71 and ln == ["hello"] for h, ln in SENT))
+
+    # The retry busy invites: nothing happened, so it is not a repeat, and
+    # it goes through exactly once.
+    SENT.clear()
+    mw.sig_api_wake = _Wake(w.api_drain)
+    r = gui.MainWindow._api_do_send(mw, 71, ["hello"])
+    check("AQ3 an immediate retry after busy is not rate-limited",
+          r == {"ok": True})
+    check("AQ4 and the text goes in once, not twice",
+          SENT == [(71, ["hello"])])
+
+    # An action that has started is typing: never answer busy mid-action.
+    def _slow_send(win, lines, dry_run=False):
+        _tq.sleep(0.6)
+        return _send_lines(win, lines)
+    gui.send_text_lines = _slow_send
+    SENT.clear()
+    mw = _api_host(w, wake=lambda: _thq.Thread(target=w.api_drain).start())
+    _t0 = _tq.time()
+    r = gui.MainWindow._api_do_send(mw, 71, ["slow"])
+    _el = _tq.time() - _t0
+    check("AQ5 a send that started before the timeout is answered with its "
+          "real result, not busy", r == {"ok": True})
+    check(f"AQ6 which meant waiting for it to finish ({_el:.2f}s)",
+          _el >= 0.55 and SENT == [(71, ["slow"])])
+    gui.send_text_lines = _real_send_aq
+
+    # Past STARTED_WAIT_S too: still not busy, since it may have typed.
+    gui.local_api.STARTED_WAIT_S = 0.1
+    _gate = _thq.Event()
+
+    def _stuck_send(win, lines, dry_run=False):
+        _gate.wait(5)
+        return _send_lines(win, lines)
+    gui.send_text_lines = _stuck_send
+    mw = _api_host(w, wake=lambda: _thq.Thread(target=w.api_drain).start())
+    r = gui.MainWindow._api_do_send(mw, 71, ["stuck"])
+    _gate.set()
+    check("AQ7 a started action that outlasts every wait says 'unfinished', "
+          "never busy", r == {"ok": False, "reason": "unfinished"})
+    _tq.sleep(0.2)
+    gui.send_text_lines = _real_send_aq
+    gui.local_api.STARTED_WAIT_S = _real_started
+
+    # The queue itself: a withdrawn ticket is skipped, the next one runs.
+    ran = []
+    t1, t2 = gui._ApiTicket(), gui._ApiTicket()
+    w.api_enqueue(lambda t: (ran.append(1), t.put({"ok": True})), t1)
+    w.api_enqueue(lambda t: (ran.append(2), t.put({"ok": True})), t2)
+    t1.cancel()
+    w.api_drain()
+    check("AQ8 the drain drops a withdrawn action and runs the next",
+          ran == [2] and not t1.done() and t2.result == {"ok": True})
+    t3 = gui._ApiTicket()
+    check("AQ9 a started ticket cannot be withdrawn",
+          t3.start() and not t3.cancel())
+
+    # Between windows, not after the pass: an action that arrives while the
+    # first window is being read runs before the second one is.
+    ORDER = []
+    reset([(73, "a"), (74, "b")], {73: IDLE, 74: IDLE})
+    w = new_watcher()
+    _real_read = gui.read_terminal_text
+
+    def _read(win):
+        h = int(win.NativeWindowHandle)
+        ORDER.append(f"read {h}")
+        if h == 73 and "api" not in ORDER:
+            w.api_enqueue(lambda t: (ORDER.append("api"),
+                                     t.put({"ok": True})), gui._ApiTicket())
+        return TEXTS.get(h, "")
+    gui.read_terminal_text = _read
+    try:
+        w._tick()
+    finally:
+        gui.read_terminal_text = _real_read
+    _first = [x for i, x in enumerate(ORDER) if x not in ORDER[:i]]
+    check(f"AQ10 a caller's action is taken between two windows of a pass "
+          f"({_first})", _first[:3] == ["read 73", "api", "read 74"])
+    check("AQ11 the old mid-pass flag, which answered busy for a whole pass, "
+          "is gone", "_in_tick" not in open("gui.py", encoding="utf-8").read())
+
+    # A spec that cannot be typed did nothing, so the corrected retry right
+    # behind it must not be throttled as a repeat (seen live 2026-09-27).
+    reset([(75, "win")], {75: IDLE})
+    w = new_watcher()
+    mw = _api_host(w, wake=w.api_drain)
+    r1 = gui.MainWindow._api_do_keys(mw, 75, "{Backspace}")
+    r2 = gui.MainWindow._api_do_keys(mw, 75, "{Back}")
+    check("AQ13 a bad key spec is refused without counting as a send",
+          r1.get("reason") == "bad_keyspec" and r2 == {"ok": True})
+
+    # A settings change the caller was told busy about must not land later.
+    _ms = gui.MainWindow.__new__(gui.MainWindow)
+    _ms.settings = _QS("auto_continue_selftest", "gui")
+    _ms.settings.clear()
+    _ms._auto_permission, _ms._auto_choose = True, False
+    _ms._append_log = lambda lvl, msg: None
+    _ms.sig_set_auto_answer = _FakeSig()
+    _tk = gui._ApiTicket()
+    _tk.cancel()
+    gui.MainWindow._api_apply_settings(_ms, {"auto_permission": False}, _tk)
+    check("AQ12 a withdrawn settings change is not applied late",
+          _ms._auto_permission is True and not _tk.done())
+    _ms.settings.clear()
+finally:
+    gui.send_text_lines = _real_send_aq
+    gui.local_api.SEND_TIMEOUT_S = _real_to
+    gui.local_api.STARTED_WAIT_S = _real_started
+
+# =============================================================================
+print("---- HT: the tool's own typing holds for a draft or an open prompt ----")
+# Measured 2026-09-27: after-finish typed its prompt + Enter into a
+# permission prompt left for a human (auto-permission off) -- the Enter picks
+# the highlighted "Yes" -- and onto a draft; the network retry and the limit
+# resume typed 'continue' onto a draft, submitting both as one message.
+_AF = "next task: refactor the parser"
+_PERM_OPEN = PERMISSION + NO_BOX
+_MOVED = (PERMISSION.replace(_M + "1", "  1").replace("  3" ". No", _M + "3" ". No")
+          + NO_BOX)
+_DRAFT = "some finished output" + DRAFT_BOX
+_EMPTY = "some finished output" + EMPTY_BOX
+
+
+def _af_run(screen, choose=False, perm=False):
+    w = af_watcher(_AF)
+    w.set_auto_answer(choose, perm)
+    logs = []
+    w.log.connect(lambda k, m: logs.append((k, m)))
+    w._tick()                                   # running seen
+    TEXTS[9] = screen
+    for _ in range(4):
+        advance(60)
+        w._tick()
+    return [s for s in SENT if s[1] == [_AF]], logs
+
+
+_sent, _logs = _af_run(_PERM_OPEN)
+check("HT1 after-finish does not type into a permission prompt left for a "
+      "human", _sent == [] and not any(s[1] == [""] for s in SENT))
+check("HT2 and says once why it is waiting",
+      sum("after-finish on" in m and "is held" in m for _, m in _logs) == 1)
+_sent, _ = _af_run(_MOVED, perm=True)
+check("HT3 nor into one whose cursor was moved off 1 (and auto-answer, "
+      "which needs the cursor on 1, leaves it too)",
+      _sent == [] and not any(s[1] == [""] for s in SENT))
+_sent, _ = _af_run(_DRAFT)
+check("HT4 nor onto a draft", _sent == [])
+_sent, _ = _af_run(_EMPTY)
+check("HT5 an empty input box still gets it", len(_sent) == 1)
+
+set_now(T0)
+reset([(61, "win")], {61: ECONN + "\n" + _DRAFT})
+w = new_watcher()
+_nl = []
+w.log.connect(lambda k, m: _nl.append((k, m)))
+for _ in range(3):
+    w._tick()
+    advance(700)
+check("HT6 a network-stuck window with a draft gets no 'continue' on top",
+      not any(s[1] == ["continue"] for s in SENT))
+check("HT7 said once, not every pass",
+      sum("not typing 'continue' over it" in m for _, m in _nl) == 1)
+TEXTS[61] = ECONN + "\n" + _EMPTY
+w._tick()
+check("HT8 cleared, the retry resumes",
+      any(s[1] == ["continue"] for s in SENT))
+
+set_now(T0)
+reset([(62, "win")], {62: BANNER})
+w = new_watcher()
+w._tick()                                       # schedules the fire
+TEXTS[62] = BANNER + "\n" + _DRAFT
+set_now(FIRE_UTC + timedelta(minutes=5))
+w._tick()
+advance(60)
+w._tick()
+check("HT9 a due limit resume holds while a draft is in the box",
+      not any("continue" in s[1] for s in SENT))
+TEXTS[62] = BANNER + "\n" + _EMPTY
+advance(60)
+w._tick()
+check("HT10 and goes out once the box is clear",
+      any(s[1][-1:] == ["continue"] for s in SENT))
 
 print()
 print("RESULT:", "ALL OK" if not failures else f"{failures} FAILURE(S)")

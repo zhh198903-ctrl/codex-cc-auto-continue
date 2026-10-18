@@ -2,6 +2,8 @@
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import json
+from pathlib import Path
+import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -79,6 +81,72 @@ class PendingSubmission(unittest.TestCase):
 
     def stage(self):
         return app.send_prompt(self.surface.window, 'continue')
+
+    def test_exact_uia_send_restores_another_windows_foreground(self):
+        self.surface.foreground = 461102
+        def forbidden():
+            raise AssertionError('Native send must not explicitly activate a window')
+        self.surface.window.control.SetActive = forbidden
+        self.surface.composer.SetFocus = lambda: setattr(self.surface, 'foreground', 123)
+        self.surface.user.SetForegroundWindow = lambda hwnd: setattr(self.surface, 'foreground', hwnd.value)
+        outcome = self.stage()
+        self.assertTrue(outcome)
+        self.assertEqual((self.surface.writes, self.surface.clicks), (1, 1))
+        self.assertEqual(self.surface.foreground, 461102)
+
+    def test_explicit_native_actions_never_fall_back_to_coordinate_clicks(self):
+        control = SimpleNamespace(IsEnabled=True, IsOffscreen=False,
+                                  Click=lambda: self.fail('No coordinate input allowed'))
+        self.assertFalse(app._act(control, patterns_only=True))
+
+    def test_focus_redraw_is_read_only_then_stages_and_sends_once(self):
+        view = self.surface.view
+        samples = [view, None, app.View('', 'probe', app.Screen(identified=True)), view]
+        def read(_): return samples.pop(0) if samples else self.surface.view
+        with patch.object(app, 'read_text', side_effect=read):
+            self.assertTrue(self.stage())
+        self.assertEqual((self.surface.writes, self.surface.clicks), (1, 1))
+
+    def test_preflight_redraw_waits_for_exact_ready_identity_before_focus_or_write(self):
+        samples = [None, app.View('', 'probe', app.Screen(identified=True)), self.surface.view]
+        def read(_): return samples.pop(0) if samples else self.surface.view
+        with patch.object(app, 'read_text', side_effect=read):
+            self.assertTrue(self.stage())
+        self.assertEqual((self.surface.writes, self.surface.clicks), (1, 1))
+
+    def test_preflight_redraw_known_wrong_identity_never_focuses_or_writes(self):
+        focus = unittest.mock.Mock()
+        self.surface.composer.SetFocus = focus
+        changed = replace(self.surface.view, identity='another')
+        with patch.object(app, 'read_text', side_effect=[None, changed]) as read:
+            self.assertEqual(self.stage().status, 'held')
+        self.assertEqual(read.call_count, 2)
+        focus.assert_not_called()
+        self.assertEqual((self.surface.writes, self.surface.clicks), (0, 0))
+
+    def test_focus_redraw_stops_on_known_changed_draft_running_or_blocked_view(self):
+        for reason in ['identity', 'thread', 'draft', 'running', 'blocked']:
+            with self.subTest(reason=reason):
+                self.surface.window.expected_thread_hint = 'hint'
+                view = replace(self.surface.view, thread_hint='hint')
+                changed = replace(view, identity='other') if reason == 'identity' else (
+                    replace(view, thread_hint='other') if reason == 'thread' else
+                    replace(view, screen=replace(view.screen, **{reason:True})))
+                with patch.object(app, 'read_text', side_effect=[view, None, changed]) as read:
+                    outcome = self.stage()
+                self.assertEqual(outcome.status, 'held')
+                self.assertEqual(read.call_count, 3)
+                self.assertEqual((self.surface.writes, self.surface.clicks), (0, 0))
+
+    def test_focus_unreadable_deadline_stages_no_input(self):
+        samples = [self.surface.view]
+        def read(_): return samples.pop(0) if samples else None
+        with patch.object(app, 'read_text', side_effect=read), \
+             patch.object(app.time, 'monotonic', side_effect=[0, 0, 0, .4, 1]):
+            outcome = self.stage()
+        self.assertEqual(outcome.status, 'held')
+        self.assertEqual(outcome.detail, 'focused_unreadable')
+        self.assertEqual((self.surface.writes, self.surface.clicks), (0, 0))
 
     def test_disabled_send_waits_then_sends_once_without_retyping(self):
         s = self.surface
@@ -194,6 +262,31 @@ class PendingSubmission(unittest.TestCase):
         self.observe(1)
         self.assertEqual(self.watcher.config['after_finish_loops']['probe'], 0)
 
+    def test_exact_rollout_detects_fast_completion_missing_from_visible_history(self):
+        self.watcher.activities = SimpleNamespace(completed_turn=lambda tid: 'rollout:full:new')
+        self.state.thread_id = 'full'
+        self.state.initialized = True
+        self.state.completion_id = 'rollout:full:old'
+        self.watcher.config['sessions']['full'] = dict(after_finish='continue', loops=1)
+        self.surface.screen(completion_id='', running=False)
+        self.observe()
+        self.assertTrue(self.state.seen_running)
+        self.assertEqual(self.state.completion_id, 'rollout:full:new')
+        self.observe(6)
+        self.assertEqual((self.surface.writes, self.surface.clicks), (1,1))
+        self.assertEqual(self.watcher.config['sessions']['full']['loops'], 0)
+        self.observe(12)
+        self.assertEqual(self.surface.clicks, 1)
+
+    def test_initial_exact_rollout_completion_is_a_baseline_not_a_trigger(self):
+        self.watcher.activities = SimpleNamespace(completed_turn=lambda tid: 'rollout:full:old')
+        self.state.thread_id = 'full'
+        self.watcher.config['sessions']['full'] = dict(after_finish='continue', loops=1)
+        self.observe()
+        self.observe(6)
+        self.assertEqual(self.surface.clicks, 0)
+        self.assertEqual(self.watcher.config['sessions']['full']['loops'], 1)
+
     def test_changed_after_finish_setting_or_exclusion_cancels_receipt(self):
         self.surface.button.IsEnabled = False
         self.state.submission = self.stage().submission
@@ -214,16 +307,107 @@ class PendingSubmission(unittest.TestCase):
         self.assertFalse(app.poll_submission(self.surface.window, receipt))
         self.assertFalse(app._submitted(self.surface.view, receipt))
 
-    def test_focus_loss_before_click_holds_the_owned_draft(self):
+    def test_delayed_user_bubble_never_reinvokes_or_reports_retryable_failure(self):
+        self.surface.ack_on_click = False
+        receipt = self.stage().submission
+        for draft in ('continue', '', 'new user draft'):
+            self.surface.value = draft
+            with patch.object(app.time, 'monotonic', return_value=receipt.invoked_at + 20):
+                outcome = app.poll_submission(self.surface.window, receipt)
+            self.assertEqual(outcome.status, 'unknown')
+            self.assertIs(outcome.submission, receipt)
+            self.assertEqual(self.surface.clicks, 1)
+
+    def test_switch_after_native_invoke_is_unknown(self):
+        self.surface.ack_on_click = False
+        receipt = self.stage().submission
+        self.surface.view.identity = 'another'
+        self.assertEqual(app.poll_submission(self.surface.window, receipt).status, 'unknown')
+        self.assertEqual(self.surface.clicks, 1)
+
+    def test_other_windows_foreground_does_not_redirect_the_owned_draft(self):
         self.surface.button.IsEnabled = False
         receipt = self.stage().submission
         self.surface.button.IsEnabled = True
         self.surface.foreground = 456
-        self.assertFalse(app.poll_submission(self.surface.window, receipt))
-        self.assertEqual(self.surface.clicks, 0)
+        self.assertTrue(app.poll_submission(self.surface.window, receipt))
+        self.assertEqual(self.surface.clicks, 1)
+        self.assertEqual(self.surface.foreground, 456)
+
+    def test_temporarily_unmounted_composer_preserves_bound_receipt_and_arm(self):
+        watcher = self.watcher
+        watcher.running = True
+        watcher.activities = None
+        self.surface.window.Name = 'probe'
+        state = State(123, 'probe', identity='chat', thread_hint='hint',
+                      thread_id='full-id', seen_running=True, submission=object())
+        watcher.states[123] = state
+        watcher.session_bindings[123] = ('chat', 'hint', 'full-id')
+        driver = SimpleNamespace(terminal_handles=lambda: [123],
+            window_from_handle=lambda _: self.surface.window,
+            read_text=lambda _: self.surface.view,
+            inspect_screen=lambda view, _: view.screen,
+            session_key=lambda _, view: view.identity,
+            window_exists=lambda _: True)
+        watcher.driver = driver
+        self.surface.view = app.View('', 'probe', app.Screen(identified=True, blocked=True))
+        with patch.object(watcher, '_observe') as observe:
+            watcher.tick()
+            observe.assert_not_called()
+            self.assertIs(watcher.states[123], state)
+            self.assertTrue(state.blind and state.seen_running)
+            self.assertIsNotNone(state.submission)
+            self.assertEqual(watcher.session_bindings[123], ('chat', 'hint', 'full-id'))
+            self.surface.view = app.View('chat', 'probe', app.Screen(identified=True, ready=True), thread_hint='hint')
+            watcher.tick()
+            observe.assert_called_once()
+            self.assertIs(watcher.states[123], state)
+            self.assertFalse(state.blind)
 
 
 class CapturedNativeSubmission(unittest.TestCase):
+    def test_bound_rollout_confirms_only_a_new_exact_user_message(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'rollout.jsonl'
+            header = dict(type='session_meta', payload=dict(id='full-thread'))
+            def message(text):
+                return dict(type='response_item', payload=dict(type='message', role='user',
+                    content=[dict(type='input_text', text=text)]))
+            def append(item):
+                with path.open('a', encoding='utf-8') as stream:
+                    stream.write(json.dumps(item) + '\n')
+            append(header)
+            append(message('continue'))  # Historical matching text is insufficient.
+            receipt = app.Submission('chat', 'continue', 'old', invoked_at=1)
+            window = SimpleNamespace(expected_thread_id='full-thread')
+            with patch.object(app, 'RecentActivities') as reader:
+                reader.return_value.thread.return_value = dict(rollout_path=str(path))
+                app._capture_rollout(window, receipt)
+                self.assertFalse(app._rollout_submitted(receipt))
+                append(message('continue\n'))
+                self.assertTrue(app._rollout_submitted(receipt))
+                view = app.View('chat', 'probe', app.Screen(), user_text='stale')
+                self.assertTrue(app._submitted(view, receipt))
+                view.identity = 'another'
+                self.assertFalse(app._submitted(view, receipt))
+
+    def test_rollout_other_user_thread_or_partial_record_cannot_confirm(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'rollout.jsonl'
+            header = json.dumps(dict(type='session_meta', payload=dict(id='full-thread'))) + '\n'
+            other = json.dumps(dict(type='response_item', payload=dict(type='message', role='user',
+                content=[dict(type='input_text', text='different')]))) + '\n'
+            match = other.replace('different', 'continue')
+            with patch.object(app, 'RecentActivities') as reader:
+                reader.return_value.thread.return_value = dict(rollout_path=str(path))
+                for content in (other + match, match.rstrip('\n')):
+                    path.write_text(header + content, encoding='utf-8')
+                    receipt = app.Submission('chat', 'continue', 'old', invoked_at=1,
+                        thread_id='full-thread', rollout_path=str(path), rollout_offset=len(header.encode()))
+                    self.assertFalse(app._rollout_submitted(receipt))
+                path.write_text(header.replace('full-thread', 'other-thread') + match, encoding='utf-8')
+                self.assertFalse(app._rollout_submitted(receipt))
+
     def test_real_native_bubble_excludes_its_timestamp(self):
         window = replay('idle')
         captured = json.loads((FIXTURES / 'native_user_bubble.json').read_text(encoding='utf-8'))
