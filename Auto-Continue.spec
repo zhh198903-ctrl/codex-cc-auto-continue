@@ -9,6 +9,20 @@ Output:
 """
 from PyInstaller.utils.hooks import collect_data_files
 from pathlib import Path
+import re
+from PyInstaller.config import CONF
+import versioned_bootloader
+
+_source = Path(versioned_bootloader.__file__).with_name('auto_continue.py').read_text(encoding='utf-8')
+_release_version = re.search(r'^APP_VERSION = "([0-9.]+)"', _source, re.M).group(1)
+
+
+class ReleaseEXE(EXE):
+    def _bootloader_file(self, exe, extension=None):
+        stock = super()._bootloader_file(exe, extension)
+        return versioned_bootloader.prepare(
+            stock, Path(CONF['workpath']) / 'release-bootloader' / Path(stock).name,
+            _release_version)
 
 # uiautomation ships a `bin/` folder with the native UIAutomationCore shim;
 # PyInstaller must copy it next to the bundled module.
@@ -90,7 +104,7 @@ a.datas = [d for d in a.datas
 
 pyz = PYZ(a.pure)
 
-exe = EXE(
+exe = ReleaseEXE(
     pyz,
     a.scripts,
     a.binaries,

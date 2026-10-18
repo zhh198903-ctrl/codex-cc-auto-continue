@@ -1,10 +1,12 @@
 # Codex/CC Auto-Continue
 
-## One-click updates (3.1.1)
+## One-click updates (independent EXE)
 
 In the independent executable, **Update now** downloads, verifies and restarts in one action. Settings and the three monitor switches survive the restart. The previous executable is saved as `Auto-Continue.exe.bak`; a failed download or verification never installs its bytes, and a failed replacement relaunches the previous copy and reports the failure.
 
 Control continues using its built-in Auto-Continue, managed by the Control package. Its bundled copy is not a standalone installation and must not be manually overwritten or have its version marker removed.
+
+Version 3.1.2 also isolates startup between release versions so existing independent 3.0.0/3.1.0 updaters can reopen the replaced EXE without inheriting a deleted temporary runtime. A legacy updater may still display its existing restart confirmation once; 3.1.1 and later complete Update now without a second confirmation.
 
 ## Local Control API revision 1
 
@@ -62,7 +64,9 @@ cd codex-cc-auto-continue
 pip install -r requirements.txt
 ```
 
-To build your own exe from source: `python build_release.py` → output at `dist/Auto-Continue.exe`.
+To build your own exe from source: `pip install -r requirements-build.txt`, then `python build_release.py` → output at `dist/Auto-Continue.exe`. Builds use pinned PyInstaller 6.19.0 and a project-local release bootloader identity so old updaters can launch a new release safely.
+
+The stock bootloader comes from [PyInstaller 6.19.0](https://github.com/pyinstaller/pyinstaller/tree/v6.19.0/bootloader). The complete release-identity modification is reproducible in `versioned_bootloader.py`; it changes a local copy of the archive-identity environment key before normal EXE assembly. The bootloader license and distribution exception are included in `licenses/PyInstaller-COPYING.txt`.
 
 `python _make_dist_zip.py` packages the executable, README, LICENSE and matching skill into `packages/Auto-Continue_dist_v<version>.zip`. `--out-dir` may select another directory inside this project. Build through `build_release.py` so unrelated DLL directories in the launching shell do not enter the bundle. Keep test executables outside `dist`; the release directory must contain only `Auto-Continue.exe`.
 

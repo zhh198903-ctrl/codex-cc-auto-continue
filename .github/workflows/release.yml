@@ -33,7 +33,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: pip install -r requirements.txt pyinstaller pytest
+        run: pip install -r requirements-build.txt
 
       - name: Verify APP_VERSION matches the tag
         # The updater compares version strings alone, so shipping an exe whose

@@ -40,6 +40,7 @@ MEMBERS = [
     (os.path.join(HERE, "dist", "Auto-Continue.exe"), "Auto-Continue.exe"),
     (os.path.join(HERE, "README.md"), "README.md"),
     (os.path.join(HERE, "LICENSE"), "LICENSE"),
+    (os.path.join(HERE, "licenses", "PyInstaller-COPYING.txt"), "licenses/PyInstaller-COPYING.txt"),
     # The Claude Code skill ships INSIDE the product package rather than as
     # a download of its own: it is a few KB of instructions about this exact
     # build's log format and settings, so a copy free to drift out of step

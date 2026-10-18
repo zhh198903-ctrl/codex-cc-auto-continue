@@ -1,0 +1,50 @@
+{
+  "version": "3.1.2",
+  "date": "2026-10-18",
+  "exe_sha256": "744702be16b40d88797b26bc724890ce13a02e4d47f81446f56daf84512771c5",
+  "exe_bytes": 28042548,
+  "source_checks": {
+    "unittest": 154,
+    "pytest": 96,
+    "subtests": 19,
+    "legacy_suites": 7
+  },
+  "legacy_environment_startup": {
+    "version": "3.1.2",
+    "exe_sha256": "744702be16b40d88797b26bc724890ce13a02e4d47f81446f56daf84512771c5",
+    "exe_bytes": 28042548,
+    "stale_legacy_environment_startup_passed": true,
+    "source_environment": "same executable path, inherited process level 1, deleted application directory",
+    "explicit_reset_environment_not_set": true,
+    "packaged_selftest_passed": true
+  },
+  "local_gui_verified": [
+    "title version",
+    "three provider tabs",
+    "bottom activity log",
+    "five recent Codex activities",
+    "manual activity refresh",
+    "poll 4 retained after native restart"
+  ],
+  "packaged_api_verified": [
+    "version",
+    "authentication required",
+    "recent bound check",
+    "text consent check",
+    "recent metadata",
+    "all monitors stopped"
+  ],
+  "packages": {
+    "Auto-Continue-Skill_dist_v3_1_2.zip": {
+      "bytes": 9670,
+      "sha256": "9fe637072e49cb3abb0f09c821865fd7068f76aeeba4ea475e874e285d4db2e7"
+    },
+    "Auto-Continue_dist_v3_1_2.zip": {
+      "bytes": 27713510,
+      "sha256": "878c3b60e19eed1955e985beb665cd90a78249bb04d5c199181c28fafbf8390e"
+    }
+  },
+  "public_download_verification": "pending publication",
+  "public_legacy_client_upgrade": "pending publication",
+  "control_bundle_modified_by_this_task": false
+}

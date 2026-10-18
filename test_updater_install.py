@@ -10,6 +10,7 @@ import zipfile
 import pytest
 
 import updater
+import versioned_bootloader
 
 
 def test_update_is_one_action_and_uses_the_full_close_path(monkeypatch):
@@ -141,3 +142,24 @@ def test_actual_windowless_helper_handles_unicode_spaces_and_percent(tmp_path, m
     assert target.read_bytes() == b'verified replacement'
     assert Path(str(target) + '.bak').read_bytes() == b'previous executable'
     assert not new.exists()
+
+
+def test_release_bootloader_forces_independent_start_after_legacy_update(tmp_path):
+    original, destination = tmp_path / 'stock.exe', tmp_path / 'project-copy.exe'
+    content = b'MZoriginal-layout' + versioned_bootloader.ARCHIVE_KEY + b'unchanged image bytes'
+    original.write_bytes(content)
+    versioned_bootloader.prepare(original, destination, '3.1.2')
+    expected = versioned_bootloader.release_key('3.1.2')
+    assert original.read_bytes() == content
+    assert destination.read_bytes() == content.replace(versioned_bootloader.ARCHIVE_KEY, expected)
+    assert len(destination.read_bytes()) == len(content)
+    assert expected != versioned_bootloader.release_key('3.1.3')
+    assert expected != versioned_bootloader.release_key('3.10.2')
+
+
+@pytest.mark.parametrize('content', [b'MZno key', versioned_bootloader.ARCHIVE_KEY * 2])
+def test_unknown_bootloader_layout_stops_the_build(tmp_path, content):
+    original = tmp_path / 'stock.exe'
+    original.write_bytes(content)
+    with pytest.raises(ValueError):
+        versioned_bootloader.prepare(original, tmp_path / 'output.exe', '3.1.2')

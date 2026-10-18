@@ -1,5 +1,6 @@
 """Build one official EXE with a Windows/Python-only DLL search path."""
 import argparse
+from importlib.metadata import version
 import os
 from pathlib import Path
 import subprocess
@@ -8,6 +9,8 @@ import sys
 ROOT = Path(__file__).resolve().parent
 
 def main():
+    if version('pyinstaller') != '6.19.0':
+        raise RuntimeError('Build with PyInstaller 6.19.0: pip install -r requirements-build.txt')
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--dist', default='dist', help='Output directory inside this project')
     args = parser.parse_args()

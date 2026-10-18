@@ -55,6 +55,34 @@
       "sha256": "34279100a6c63d1ef51c374e64b8bd1e944db438b5977f36dc7e0081bf6b6652"
     }
   },
-  "public_download_verification": "pending publication",
-  "control_bundle_modified_by_this_task": false
+  "public_download_verification": {
+    "version": "3.1.1",
+    "github_release": "https://github.com/zhh198903-ctrl/codex-cc-auto-continue/releases/tag/v3.1.1",
+    "source_commit": "0c4b484c8666fd51113ce482c6ed686ea6aecc03",
+    "exe_sha256": "336eea3492bf458ffc20b1fcf0ef223dabd7d5d9dca8b14d08cb09b552a866e1",
+    "exe_bytes": 28041104,
+    "packages": {
+      "Auto-Continue_dist_v3_1_1.zip": {
+        "bytes": 27699832,
+        "sha256": "34279100a6c63d1ef51c374e64b8bd1e944db438b5977f36dc7e0081bf6b6652"
+      },
+      "Auto-Continue-Skill_dist_v3_1_1.zip": {
+        "bytes": 9578,
+        "sha256": "c8b65f845f45b63990274622d5eeee7be50ad5c84e05e4677bbddbe2ae0bf5bf"
+      }
+    },
+    "github_and_zip_exe_match_local": true,
+    "public_download_verified": true,
+    "http_range_verified": true,
+    "other_homepage_content_identical": true,
+    "server_versions_retained": [
+      "3.1.1",
+      "3.1.0",
+      "3.0.0",
+      "2.3.2",
+      "2.3.1"
+    ]
+  },
+  "control_bundle_modified_by_this_task": false,
+  "legacy_client_followup": "Unmodified 3.1.0 downloaded and replaced 3.1.1, but the old restart helper inherited a deleted Python runtime. First-update startup compatibility is repaired in 3.1.2."
 }
