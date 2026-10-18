@@ -381,7 +381,8 @@ def download_update(version: str,
                     dest_path: str,
                     progress_cb=None,
                     total_hint: int = 0,
-                    log_cb=None) -> str:
+                    log_cb=None,
+                    expected_sha256: Optional[str] = None) -> str:
     """Fetch the new exe from whichever source is quicker, and fall back.
 
     Either source alone can carry an update, so a failure on one is not a
@@ -416,9 +417,14 @@ def download_update(version: str,
                     os.remove(zpath)
                 except OSError:
                     pass
-                return out
-            return download_asset(url, dest_path, progress_cb=progress_cb,
-                                  total_hint=total_hint, keep_partial=True)
+            else:
+                out = download_asset(url, dest_path, progress_cb=progress_cb,
+                                     total_hint=total_hint, keep_partial=True)
+            if total_hint and os.path.getsize(out) != total_hint:
+                raise ValueError('Release size mismatch')
+            if not verify_sha256(out, expected_sha256):
+                raise ValueError('Release SHA-256 mismatch')
+            return out
         except Exception as e:
             last = e
             _say(f"update source failed ({type(e).__name__}); trying the other")
@@ -473,7 +479,8 @@ def update_failure_marker_path(target_exe: str) -> str:
     return target_exe + ".update-failed.txt"
 
 
-def build_swap_bat(new_exe: str, target_exe: str, relaunch: bool = True) -> str:
+def build_swap_bat(new_exe: str, target_exe: str, relaunch: bool = True,
+                   *, paths_from_environment: bool = False) -> str:
     """Return the .bat text that waits for the old exe's lock to drop, moves
     the new exe over it, and relaunches `target_exe` — on BOTH the success
     path and the give-up path — then self-deletes. Split out for testing.
@@ -495,12 +502,24 @@ def build_swap_bat(new_exe: str, target_exe: str, relaunch: bool = True) -> str:
     (default True; tests pass False to inspect the bat without that line)
     gates that single relaunch line, which both paths converge on.
     """
+    if any(ch in new_exe + target_exe for ch in '\r\n"'):
+        raise ValueError('Invalid update path')
+    # Percent expansion still occurs inside quoted batch paths; delayed
+    # expansion must also stay off for directories containing an exclamation.
+    if paths_from_environment:
+        new_exe, target_exe = '%AUTO_CONTINUE_UPDATE_NEW%', '%AUTO_CONTINUE_UPDATE_EXE%'
+    else:
+        new_exe, target_exe = new_exe.replace('%', '%%'), target_exe.replace('%', '%%')
     marker = update_failure_marker_path(target_exe)
     relaunch_line = f'start "" "{target_exe}"\r\n' if relaunch else ""
     return (
         "@echo off\r\n"
-        "chcp 65001 >nul\r\n"
+        "setlocal DisableDelayedExpansion\r\n"
+        "set PYINSTALLER_RESET_ENVIRONMENT=1\r\n"
+        "chcp 65001 >nul 2>&1\r\n"
         "set tries=0\r\n"
+        f'copy /y "{target_exe}" "{target_exe}.bak" >nul 2>&1\r\n'
+        "if errorlevel 1 goto giveup\r\n"
         ":waitloop\r\n"
         "set /a tries+=1\r\n"
         "if %tries% gtr 150 goto giveup\r\n"
@@ -522,7 +541,8 @@ def build_swap_bat(new_exe: str, target_exe: str, relaunch: bool = True) -> str:
 
 def stage_and_swap(new_exe: str,
                    target_exe: Optional[str] = None,
-                   relaunch: bool = True) -> "subprocess.Popen":
+                   relaunch: bool = True,
+                   resume: Optional[dict] = None) -> "subprocess.Popen":
     """Launch a detached helper that replaces the running exe with `new_exe`.
 
     Frozen-only (raises RuntimeError otherwise). Writes the swap .bat to
@@ -534,9 +554,20 @@ def stage_and_swap(new_exe: str,
         raise RuntimeError("stage_and_swap() is only valid in a frozen build")
     target = os.path.abspath(target_exe or current_exe_path())
     new_exe = os.path.abspath(new_exe)
-    bat_path = os.path.join(tempfile.gettempdir(), f"ac_update_{os.getpid()}.bat")
-    with open(bat_path, "w", encoding="utf-8") as fh:
-        fh.write(build_swap_bat(new_exe, target, relaunch=relaunch))
+    if not os.path.isfile(new_exe) or not os.path.isfile(target):
+        raise FileNotFoundError('The staged update or installed executable is missing')
+    if os.path.normcase(new_exe) == os.path.normcase(target):
+        raise ValueError('Staged update must differ from the installed executable')
+    env = os.environ.copy()
+    # CREATE_NO_WINDOW has no console code page: chcp cannot make a UTF-8
+    # batch containing CJK paths reliable there. Keep the script ASCII and
+    # pass all paths through CreateProcess's Unicode environment instead.
+    env.update(AUTO_CONTINUE_UPDATE_NEW=new_exe, AUTO_CONTINUE_UPDATE_EXE=target)
+    if resume is not None:
+        env['AUTO_CONTINUE_UPDATE_RESUME'] = json.dumps(validate_resume_state(resume))
+    descriptor, bat_path = tempfile.mkstemp(prefix='ac_update_', suffix='.bat')
+    with os.fdopen(descriptor, "w", encoding="ascii", newline='') as fh:
+        fh.write(build_swap_bat(new_exe, target, relaunch=relaunch, paths_from_environment=True))
     return subprocess.Popen(
         ["cmd", "/c", bat_path],
         creationflags=_DETACHED_PROCESS | _CREATE_NO_WINDOW,
@@ -545,6 +576,7 @@ def stage_and_swap(new_exe: str,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        env=env,
     )
 
 
@@ -552,3 +584,27 @@ def staged_exe_path() -> str:
     """Where a downloaded update is written: `<exe_dir>/Auto-Continue.exe.new`
     (same volume as the target so the swap `move` is an atomic rename)."""
     return os.path.join(os.path.dirname(current_exe_path()), ASSET_NAME + ".new")
+
+
+def validate_resume_state(data: dict) -> dict:
+    names = ('claude', 'codex', 'codex_app')
+    if not isinstance(data, dict) or set(data) - set(names) or any(type(v) is not bool for v in data.values()):
+        raise ValueError('Invalid monitor resume state')
+    return {name: data.get(name, False) for name in names}
+
+
+def take_resume_state() -> Optional[dict]:
+    value = os.environ.pop('AUTO_CONTINUE_UPDATE_RESUME', None)
+    return validate_resume_state(json.loads(value)) if value is not None else None
+
+
+def take_update_failure() -> str:
+    if not is_frozen():
+        return ''
+    marker = update_failure_marker_path(current_exe_path())
+    if not os.path.isfile(marker):
+        return ''
+    with open(marker, encoding='utf-8', errors='replace') as stream:
+        message = stream.read(2000).strip()
+    os.remove(marker)
+    return message

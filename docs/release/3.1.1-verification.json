@@ -1,0 +1,60 @@
+{
+  "version": "3.1.1",
+  "date": "2026-10-18",
+  "exe_sha256": "336eea3492bf458ffc20b1fcf0ef223dabd7d5d9dca8b14d08cb09b552a866e1",
+  "exe_bytes": 28041104,
+  "source_checks": {
+    "unittest": 154,
+    "pytest": 93,
+    "subtests": 19,
+    "legacy_suites": 7
+  },
+  "independent_native_upgrade": {
+    "version": "3.1.1",
+    "native_one_click_update": true,
+    "test_source": "fixed updater factory labeled 3.1.0; local HTTP metadata",
+    "unmodified_candidate_exe": true,
+    "unicode_space_percent_exclamation_path": true,
+    "exe_sha256": "336eea3492bf458ffc20b1fcf0ef223dabd7d5d9dca8b14d08cb09b552a866e1",
+    "exe_bytes": 28041104,
+    "previous_exe_backup_verified": true,
+    "setting_poll_before_after": 7,
+    "monitors_restored": {
+      "codex": true,
+      "codex_app": false,
+      "claude": false
+    },
+    "original_autostart_false_preserved": true,
+    "actual_actions_sent": 0,
+    "claude_driver_or_login_exercised": false,
+    "control_bundle_changed": false
+  },
+  "local_gui_verified": [
+    "title version",
+    "three provider tabs",
+    "bottom activity log",
+    "five recent Codex activities",
+    "manual activity refresh",
+    "saved poll 3 restored after actual EXE restart"
+  ],
+  "packaged_api_verified": [
+    "version",
+    "authentication required",
+    "recent bound check",
+    "text consent check",
+    "recent metadata",
+    "all monitors stopped"
+  ],
+  "packages": {
+    "Auto-Continue-Skill_dist_v3_1_1.zip": {
+      "bytes": 9578,
+      "sha256": "c8b65f845f45b63990274622d5eeee7be50ad5c84e05e4677bbddbe2ae0bf5bf"
+    },
+    "Auto-Continue_dist_v3_1_1.zip": {
+      "bytes": 27699832,
+      "sha256": "34279100a6c63d1ef51c374e64b8bd1e944db438b5977f36dc7e0081bf6b6652"
+    }
+  },
+  "public_download_verification": "pending publication",
+  "control_bundle_modified_by_this_task": false
+}

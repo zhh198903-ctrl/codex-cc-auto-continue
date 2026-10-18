@@ -1,5 +1,11 @@
 # Codex/CC Auto-Continue
 
+## One-click updates (3.1.1)
+
+In the independent executable, **Update now** downloads, verifies and restarts in one action. Settings and the three monitor switches survive the restart. The previous executable is saved as `Auto-Continue.exe.bak`; a failed download or verification never installs its bytes, and a failed replacement relaunches the previous copy and reports the failure.
+
+Control continues using its built-in Auto-Continue, managed by the Control package. Its bundled copy is not a standalone installation and must not be manually overwritten or have its version marker removed.
+
 ## Local Control API revision 1
 
 Version 3.1.0 includes the Codex companion API for Codex Claude Control: sessions, typed actions, operation results, context and SSE. The CLI backend and native driver are maintained here and mirrored into Control with a SHA-256 manifest. A 60-second per-provider/thread lease suspends automatic approvals and permission-mode changes while retaining configured recovery and follow-ups. Confirmed follow-ups consume the budget once; uncertain writes pause the target. Bundled copies update with the full Control package. This release includes the Control integration. Validation covers the source regressions and the packaged local API; complete Control-client acceptance is tracked separately.

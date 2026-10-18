@@ -74,6 +74,9 @@ jobs:
       - name: Control integration checks
         run: python -m pytest test_control_recent.py test_control_worker_scheduling.py test_native_control_choice_commit.py test_native_control_focus.py test_native_control_question_focus.py test_native_control_stop_focus.py test_codex_app_question_coexist.py test_codex_app_read_snapshot.py test_codex_context_fidelity.py test_codex_local_context.py test_codex_multiwindow.py test_codex_submission_context.py -q
 
+      - name: One-click update checks
+        run: python -m pytest test_updater_install.py -q
+
       - name: Build onefile exe
         run: python build_release.py
 

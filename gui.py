@@ -3587,6 +3587,8 @@ class Updater(QObject):
             self.download_failed.emit("Control integration: update the matching Control package; independent binary replacement is disabled")
             return
         try:
+            if not _re.fullmatch(r'[0-9a-fA-F]{64}', rel.get('sha256') or ''):
+                raise ValueError('Release SHA-256 is missing; retry after release metadata is available')
             dest = updater.staged_exe_path()
             size = int(rel.get("asset_size") or 0)
 
@@ -3606,7 +3608,7 @@ class Updater(QObject):
             updater.download_update(
                 rel.get("version") or "", rel["asset_url"], dest,
                 progress_cb=cb, total_hint=size,
-                log_cb=self.note.emit)
+                log_cb=self.note.emit, expected_sha256=rel['sha256'])
             if not updater.verify_sha256(dest, rel.get("sha256")):
                 try:
                     os.remove(dest)
@@ -4355,14 +4357,6 @@ class MainWindow(CodexGuiMixin, QMainWindow):
         self.update_notes_btn.setVisible(False)
         self.update_label.setText(f"Downloading v{ver}…")
         self._append_log("info", f"downloading v{ver}…")
-        if not self._pending_release.get("sha256"):
-            # Surface the silent best-effort branch of verify_sha256: with
-            # no published digest the download is only protected by HTTPS.
-            self._append_log(
-                "warn",
-                "release has no sha256 digest — integrity check "
-                "will be skipped"
-            )
         self.sig_update_download.emit(dict(self._pending_release))
 
     @pyqtSlot(int)
@@ -4388,29 +4382,17 @@ class MainWindow(CodexGuiMixin, QMainWindow):
                 "info", f"dev mode — staged + verified at {path} (skip swap)")
             self.update_label.setText(f"v{ver} downloaded (dev mode, no swap)")
             return
-        resp = QMessageBox.question(
-            self, "Update Auto-Continue",
-            f"Update to v{ver} and restart now?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.Yes)
-        if resp != QMessageBox.StandardButton.Yes:
-            # User declined — restore the actionable banner.
-            if self._pending_release:
-                self._on_update_available(self._pending_release)
-            return
         try:
             self._append_log("info", f"installing v{ver} and restarting…")
             # Launch the detached swapper FIRST — if writing/launching the
             # swap .bat fails we bail out here with the watcher threads
             # still alive, instead of a dead-but-"Running" app.
-            updater.stage_and_swap(path)
-            self.sig_stop.emit()
-            self._save_settings()
-            if self.keep_awake_check.isChecked():
-                self._apply_keep_awake(False)
-            self._shutdown_thread(self.worker_thread)
-            self._shutdown_thread(self.updater_thread)
-            QApplication.instance().quit()          # clean exit -> lock drops
+            state = self.codex_service.monitor_state()
+            running = {name: bool(value and not state['paused']) for name, value in state['running'].items()}
+            updater.stage_and_swap(path, resume=running)
+            # Update now already authorizes the restart. Use the normal close
+            # path to save settings and release the local API and UIA driver.
+            self.close()
         except Exception as e:
             self._append_log("err", f"install failed: {type(e).__name__}: {e}")
             if self._pending_release:
@@ -5308,7 +5290,7 @@ class MainWindow(CodexGuiMixin, QMainWindow):
             self._apply_keep_awake(True)
         # Resume watching automatically (also covers the relaunch after a
         # self-update — protection must not silently lapse).
-        if self.autostart_check.isChecked():
+        if self.autostart_check.isChecked() and 'AUTO_CONTINUE_UPDATE_RESUME' not in os.environ:
             self.sig_start.emit()
 
     def _save_settings(self) -> None:
@@ -7587,6 +7569,23 @@ def main() -> int:
     else:
         win.show()
     win.attach_show_listener(show_event, ack_event)
+    def update_started():
+        try:
+            failure = updater.take_update_failure()
+            if failure:
+                win._append_log('err', failure)
+            running = updater.take_resume_state()
+            if running is not None:
+                if not win.codex_service.monitor_state()['paused']:
+                    for name, start, stop in (
+                            ('claude', win.sig_claude_start, win.sig_claude_stop),
+                            ('codex', win.sig_codex_start, win.sig_codex_stop),
+                            ('codex_app', win.sig_codex_app_start, win.sig_codex_app_stop)):
+                        (start if running[name] else stop).emit()
+                win._append_log('info', 'Update complete; restoring previous monitor switches')
+        except Exception as exc:
+            win._append_log('err', 'Could not restore update state: ' + str(exc))
+    QTimer.singleShot(0, update_started)
     return app.exec()
 
 
