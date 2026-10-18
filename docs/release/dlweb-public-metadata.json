@@ -102,208 +102,33 @@
     }
   },
   "changelog": {
-    "2.1.3": {
-      "date": "2026-09-24",
-      "items": [
-        {
-          "t": "fix",
-          "zh": "Claude Code 自己在等 API 响应、重试的那段时间，不再被当成空闲——之前开了「跑完接下一棒」的窗口会在这段等待里被插进下一个任务。",
-          "en": "While Claude Code itself is waiting on an API response or retrying, the window is no longer treated as idle. Previously, a window with “hand off to the next task when done” turned on could have the next task slipped in during that wait."
-        },
-        {
-          "t": "fix",
-          "zh": "「没有响应」这类最终报错换了措辞后也能认出，不会让会话一直停着。",
-          "en": "Final “no response” errors are still recognised when their wording changes, so the session no longer sits there stuck."
-        },
-        {
-          "t": "fix",
-          "zh": "夹在句子中间引用的报错不再被当成会话卡住——之前 Claude 解释你贴的报错时，会被反复发 continue。",
-          "en": "An error message quoted in the middle of a sentence is no longer mistaken for a stuck session. Previously, when Claude was explaining an error you had pasted, it would be sent “continue” over and over."
-        }
-      ]
-    },
-    "2.1.2": {
-      "date": "2026-09-23",
-      "items": [
-        {
-          "t": "fix",
-          "zh": "「额度用完就切模型」开着、却一个窗口都没选时，以前什么都不做、也不提示；现在日志会直说它为什么没动、去哪儿改。",
-          "en": "With switch-on-empty-quota turned on but no window selected, it used to do nothing and say nothing. The log now says why it didn't act and where to change it."
-        },
-        {
-          "t": "fix",
-          "zh": "额度用完时手动切换模型，不再被当成「不用再管这个窗口」而移出管理范围；额度恢复后会自动切回。",
-          "en": "Switching models by hand because the quota ran out no longer takes the window out of management; it switches back once the quota returns."
-        },
-        {
-          "t": "improve",
-          "zh": "配套程序通过本地接口替你打的字，日志里只记字数，不再记录原文。",
-          "en": "Text a companion program types for you through the local interface is logged as a character count, no longer word for word."
-        },
-        {
-          "t": "improve",
-          "zh": "网络卡住时的每一次自动继续都会如实记进日志，便于核对它到底发了多少次。",
-          "en": "Every automatic 'continue' sent while the network is stuck is now logged, so you can see exactly how many were sent."
-        }
-      ]
-    },
-    "2.1.1": {
-      "date": "2026-09-14",
+    "3.1.0": {
+      "date": "2026-10-18",
       "items": [
         {
           "t": "new",
-          "zh": "远程审批的配套程序（比如在手机上点批准）现在可以通过本地接口关掉本机的自动回车，免得提示还没人决定就被放行了；改动会同步到设置界面，并记进日志。",
-          "en": "Companion programs that handle approval remotely (tapping Approve on your phone, for example) can now switch off this machine's auto-Enter through the local interface, so a prompt is not waved through before anyone has decided. The change is reflected in the settings window and written to the log."
+          "zh": "新增供配套程序使用的 Codex 会话接口，可查看会话状态、提交操作并查询回执；事件通知及时更新状态。",
+          "en": "Adds Codex session access for companion programs, with state, actions, operation receipts and live event notifications."
         },
         {
           "t": "improve",
-          "zh": "配套技能包补充了对应日志行的读法。",
-          "en": "The companion skill now explains how to read the matching log lines."
-        }
-      ]
-    },
-    "2.1.0": {
-      "date": "2026-09-14",
-      "items": [
-        {
-          "t": "new",
-          "zh": "新增本地接口：本机上的伴侣程序可以读取窗口状态、请求发送指令，由 Auto-Continue 统一执行，避免多个程序争抢前台。读取会话内容需另行开启。",
-          "en": "A local interface for companion programs on the same machine: they can read window state and ask for a keystroke to be sent, and Auto-Continue is the one that actually sends it — so two programs no longer fight over the foreground. Reading conversation content stays off until you switch it on."
+          "zh": "同一 Codex 会话在多个窗口显示时合并处理，避免重复批准或重复续接；前台或会话发生变化时先重新核对。",
+          "en": "Coalesces multiple windows displaying one Codex session to avoid duplicate approvals or follow-ups, and rechecks after focus or session changes."
         },
         {
           "t": "fix",
-          "zh": "反复恢复之后重试间隔会失效，现在不会了。",
-          "en": "The retry interval stopped being honoured after a session recovered several times over. It now holds."
-        }
-      ]
-    },
-    "2.0.15": {
-      "date": "2026-08-11",
-      "items": [
-        {
-          "t": "new",
-          "zh": "更新改为同时从 GitHub 和下载站取，哪边快用哪边；一边失败会自动改走另一边，而不是整个放弃更新。",
-          "en": "Updates now race the GitHub asset against the download-site mirror — whichever answers faster carries the transfer, and if one fails it falls through to the other instead of cancelling the update."
-        }
-      ]
-    },
-    "2.0.14": {
-      "date": "2026-08-11",
-      "items": [
-        {
-          "t": "fix",
-          "zh": "限制解除时间读晚了会被算成第二天，从而把一个已经恢复的会话白等一天——现在按已经过去处理。",
-          "en": "A reset time read too late was treated as tomorrow's, parking a session that had already recovered for a full day. It is now recognised as already past."
-        }
-      ]
-    },
-    "2.0.11": {
-      "date": "2026-08-11",
-      "items": [
-        {
-          "t": "fix",
-          "zh": "看门狗不再在每次成功处理之后自己退出。",
-          "en": "The watchdog no longer exits after every time it successfully does its job."
-        }
-      ]
-    },
-    "2.0.18": {
-      "date": "2026-09-06",
-      "items": [
-        {
-          "t": "fix",
-          "zh": "读不到的屏幕不再被当成「屏幕上没东西」。Windows 拒绝读取某个窗口时，之前会被当作空屏，由此引出三处误判：所有窗口的状态被一次性清空（连带丢掉正在进行的恢复走到哪一步、以及发送冷却）、额度闩锁在什么都没看到的情况下凭空释放、以及误报网络已恢复并把重试节流一起丢掉——于是下一轮真读到错误时会立刻重试而不是等满间隔。",
-          "en": "A screen it could not read is no longer treated as a screen with nothing on it. When Windows refuses to read a window, that silence used to be taken as fact, causing three misjudgements: every window's state was pruned at once (losing how far an in-flight recovery had got, and the send cooldown), the quota latch released having looked at nothing, and a network error was declared recovered — which also threw away the retry throttle, so the next pass that did read the error poked immediately instead of waiting out the interval."
-        },
-        {
-          "t": "new",
-          "zh": "新增「Export log for feedback…」：导出一份抹掉窗口标题和你自己输入的提示词的日志（窗口只留 #id），写盘前把全文摊开给你过目。Claude Code 的窗口是按对话命名的，原始日志因此会带出这台机器上的项目和任务名。轮转出去的 .old 那半也一并包含——第二天才写的报障，往往已经跨过一次轮转。",
-          "en": "New \"Export log for feedback…\": it writes a copy with window titles and your own typed prompts stripped — windows appear as #id only — and shows you the whole thing before writing anything. A Claude Code window is named after its conversation, so the raw file names the projects and tasks on your machine. The rotated .old half is included, because a report written the next morning is often already past a rotation."
+          "zh": "修复任务上下文或页面信息插入后，已提交消息的确认可能被打断的问题；结果不明确时暂停，避免重复发送。",
+          "en": "Fixes submission confirmation when task context or page information precedes the user message; uncertain results pause rather than being resent."
         },
         {
           "t": "improve",
-          "zh": "日志每行现在标出窗口 id（`'标题' #id`），并且会直说某次到底是「读不到」还是「屏幕上确实没东西」。标题既不唯一（同一个任务的两个会话写出一模一样的行）也不稳定（会话干着干着会自己改名），此前「这个窗口是不是在重试间隔内被戳了两次」根本没法从日志回答。",
-          "en": "Log lines now name the window as 'title' #id, and say outright whether a pass could not read the screen or genuinely found nothing on it. Titles are neither unique (two sessions on one task write identical lines) nor stable (a session renames itself as it works), so \"was this window poked twice inside the retry interval?\" could not be answered from the log at all."
+          "zh": "配套程序按需读取最近会话及原文上下文，保留格式并支持分页；正文读取仍由单独开关控制。",
+          "en": "Companions can request recent sessions and paginated original conversation text while preserving formatting. Text access remains separately opt-in."
         },
         {
           "t": "improve",
-          "zh": "到点该发的限制恢复会等当前会话流式输出结束再发，不再排在正在跑的回合后面、又多起一轮。",
-          "en": "A due limit fire is now held while the session is still streaming, instead of being queued behind the running turn and starting an extra one."
-        }
-      ]
-    },
-    "2.2.0": {
-      "date": "2026-10-02",
-      "items": [
-        {
-          "t": "new",
-          "zh": "新增 Codex CLI 自动继续，支持单独 Claude、单独 Codex 或同时监控，设置与状态相互独立。",
-          "en": "Adds Codex CLI auto-continue, with Claude-only, Codex-only or combined monitoring and independent settings and state."
-        },
-        {
-          "t": "new",
-          "zh": "Codex 支持额度重置恢复、有限次数网络重试和任务完成后续接，模型与推理强度可逐窗口设置，只应用于当前会话。",
-          "en": "Codex supports usage-reset recovery, bounded network retries and follow-ups, with per-window model and reasoning effort applied only to the current session."
-        },
-        {
-          "t": "improve",
-          "zh": "基于真实 Codex CLI 窗口适配；草稿、运行中任务和确认菜单暂停自动输入。Claude 原监控逻辑保持不变。",
-          "en": "Adapted against real Codex CLI windows. Drafts, active turns and confirmation dialogs hold automatic input. Existing Claude monitoring remains unchanged."
-        }
-      ]
-    },
-    "2.3.0": {
-      "date": "2026-10-02",
-      "items": [
-        {
-          "t": "fix",
-          "zh": "修复 Codex CLI 被误识别为 Claude，以及切换终端标签页后残留 Claude 标记的问题。",
-          "en": "Fixes Codex CLI being misidentified as Claude and stale Claude labels after terminal tab switches."
-        },
-        {
-          "t": "fix",
-          "zh": "发布包仅保留一个 Auto-Continue.exe，修复打包环境导致程序无法启动的问题。",
-          "en": "Ships one Auto-Continue.exe and fixes startup failures caused by the build environment."
-        },
-        {
-          "t": "new",
-          "zh": "新增 Codex 桌面 App 自动继续，可与 CLI 分别或同时监控，支持错误恢复和任务完成后续接。",
-          "en": "Adds Codex desktop App auto-continue, independently or alongside the CLI, with recovery and follow-ups."
-        },
-        {
-          "t": "improve",
-          "zh": "CLI 与桌面 App 各有独立参数、模型与强度、续发次数和排除设置；草稿、菜单和会话切换暂停发送。",
-          "en": "CLI and App have separate timing, model/effort, loop counts and exclusions. Drafts, menus and conversation switches hold sends."
-        }
-      ]
-    },
-    "2.3.1": {
-      "date": "2026-10-03",
-      "items": [
-        {
-          "t": "fix",
-          "zh": "修复真实 Codex 桌面任务已有中间回复或工具记录后，再出现限额提示时漏识别的问题。",
-          "en": "Recognises native quota errors after commentary or tool output in actual Codex desktop tasks."
-        },
-        {
-          "t": "fix",
-          "zh": "App 内部重试时明确显示限额状态，待 App 可输入后才继续；历史错误和引用文本不会触发恢复。",
-          "en": "Shows quota state during the App's internal retries, holding input until ready. Historical errors and quoted text do not trigger recovery."
-        }
-      ]
-    },
-    "2.3.2": {
-      "date": "2026-10-03",
-      "items": [
-        {
-          "t": "fix",
-          "zh": "修复 Codex 桌面 App 在限额期间只填入 continue、发送恢复可用后仍未提交的问题。",
-          "en": "Retains the pending Codex desktop follow-up while Send is unavailable and submits it when native Send becomes usable."
-        },
-        {
-          "t": "fix",
-          "zh": "消息确认提交后才计入重试或跟进次数；修改草稿、切换聊天、跳过或排除窗口会取消待发送。",
-          "en": "Counts retries and follow-ups only after submission is confirmed. Editing the draft, switching chats, Skip or Exclude cancels the pending send."
+          "zh": "改善问题卡片、停止操作和后台队列的响应，接管与自动监测协作时保留既定恢复及续接配置。",
+          "en": "Improves question cards, stop actions and queued work while retaining configured recovery and follow-ups during companion handoff."
         }
       ]
     },
@@ -337,35 +162,61 @@
         }
       ]
     },
-    "3.1.0": {
-      "date": "2026-10-18",
+    "2.3.2": {
+      "date": "2026-10-03",
       "items": [
         {
-          "t": "new",
-          "zh": "新增供配套程序使用的 Codex 会话接口，可查看会话状态、提交操作并查询回执；事件通知及时更新状态。",
-          "en": "Adds Codex session access for companion programs, with state, actions, operation receipts and live event notifications."
-        },
-        {
-          "t": "improve",
-          "zh": "同一 Codex 会话在多个窗口显示时合并处理，避免重复批准或重复续接；前台或会话发生变化时先重新核对。",
-          "en": "Coalesces multiple windows displaying one Codex session to avoid duplicate approvals or follow-ups, and rechecks after focus or session changes."
+          "t": "fix",
+          "zh": "修复 Codex 桌面 App 在限额期间只填入 continue、发送恢复可用后仍未提交的问题。",
+          "en": "Retains the pending Codex desktop follow-up while Send is unavailable and submits it when native Send becomes usable."
         },
         {
           "t": "fix",
-          "zh": "修复任务上下文或页面信息插入后，已提交消息的确认可能被打断的问题；结果不明确时暂停，避免重复发送。",
-          "en": "Fixes submission confirmation when task context or page information precedes the user message; uncertain results pause rather than being resent."
+          "zh": "消息确认提交后才计入重试或跟进次数；修改草稿、切换聊天、跳过或排除窗口会取消待发送。",
+          "en": "Counts retries and follow-ups only after submission is confirmed. Editing the draft, switching chats, Skip or Exclude cancels the pending send."
+        }
+      ]
+    },
+    "2.3.1": {
+      "date": "2026-10-03",
+      "items": [
+        {
+          "t": "fix",
+          "zh": "修复真实 Codex 桌面任务已有中间回复或工具记录后，再出现限额提示时漏识别的问题。",
+          "en": "Recognises native quota errors after commentary or tool output in actual Codex desktop tasks."
+        },
+        {
+          "t": "fix",
+          "zh": "App 内部重试时明确显示限额状态，待 App 可输入后才继续；历史错误和引用文本不会触发恢复。",
+          "en": "Shows quota state during the App's internal retries, holding input until ready. Historical errors and quoted text do not trigger recovery."
+        }
+      ]
+    },
+    "2.3.0": {
+      "date": "2026-10-02",
+      "items": [
+        {
+          "t": "fix",
+          "zh": "修复 Codex CLI 被误识别为 Claude，以及切换终端标签页后残留 Claude 标记的问题。",
+          "en": "Fixes Codex CLI being misidentified as Claude and stale Claude labels after terminal tab switches."
+        },
+        {
+          "t": "fix",
+          "zh": "发布包仅保留一个 Auto-Continue.exe，修复打包环境导致程序无法启动的问题。",
+          "en": "Ships one Auto-Continue.exe and fixes startup failures caused by the build environment."
+        },
+        {
+          "t": "new",
+          "zh": "新增 Codex 桌面 App 自动继续，可与 CLI 分别或同时监控，支持错误恢复和任务完成后续接。",
+          "en": "Adds Codex desktop App auto-continue, independently or alongside the CLI, with recovery and follow-ups."
         },
         {
           "t": "improve",
-          "zh": "配套程序按需读取最近会话及原文上下文，保留格式并支持分页；正文读取仍由单独开关控制。",
-          "en": "Companions can request recent sessions and paginated original conversation text while preserving formatting. Text access remains separately opt-in."
-        },
-        {
-          "t": "improve",
-          "zh": "改善问题卡片、停止操作和后台队列的响应，接管与自动监测协作时保留既定恢复及续接配置。",
-          "en": "Improves question cards, stop actions and queued work while retaining configured recovery and follow-ups during companion handoff."
+          "zh": "CLI 与桌面 App 各有独立参数、模型与强度、续发次数和排除设置；草稿、菜单和会话切换暂停发送。",
+          "en": "CLI and App have separate timing, model/effort, loop counts and exclusions. Drafts, menus and conversation switches hold sends."
         }
       ]
     }
-  }
+  },
+  "version": "3.1.0"
 }

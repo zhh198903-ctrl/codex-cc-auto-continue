@@ -42,3 +42,17 @@ question interactions were not exercised against user working conversations.
 Their changed paths are covered by source regressions and captured fixtures.
 Claude login and live Claude sessions were not driven. Native quota/reset,
 external outages and model quality were not newly exercised in this release.
+
+## Public package verification
+
+GitHub source checks passed for release commit
+`69813097b58a75819e6f707b737bf371d6f75c94`.
+GitHub Latest is the published Auto-Continue v3.1.0 release.
+Both public dlweb ZIPs passed full download size, SHA-256 and ZIP CRC checks;
+HTTP Range requests returned 206. The downloaded EXE, installed EXE and
+GitHub asset digest match. All 27 public homepage download links were reachable.
+
+The product and companion each retain five versions: 3.1.0, 3.0.0, 2.3.2,
+2.3.1 and 2.3.0. Only the Auto-Continue card changed in the raw server homepage;
+all other page bytes were preserved. No other product or Control package,
+protected-site, chatbot, nginx or relay changes were deployed.
