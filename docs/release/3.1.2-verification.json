@@ -44,7 +44,59 @@
       "sha256": "878c3b60e19eed1955e985beb665cd90a78249bb04d5c199181c28fafbf8390e"
     }
   },
-  "public_download_verification": "pending publication",
-  "public_legacy_client_upgrade": "pending publication",
+  "public_download_verification": {
+    "version": "3.1.2",
+    "github_release": "https://github.com/zhh198903-ctrl/codex-cc-auto-continue/releases/tag/v3.1.2",
+    "source_commit": "e673c4f84c7b447955e901be83f607e68fab03ec",
+    "exe_sha256": "744702be16b40d88797b26bc724890ce13a02e4d47f81446f56daf84512771c5",
+    "exe_bytes": 28042548,
+    "packages": {
+      "Auto-Continue_dist_v3_1_2.zip": {
+        "bytes": 27713510,
+        "sha256": "878c3b60e19eed1955e985beb665cd90a78249bb04d5c199181c28fafbf8390e"
+      },
+      "Auto-Continue-Skill_dist_v3_1_2.zip": {
+        "bytes": 9670,
+        "sha256": "9fe637072e49cb3abb0f09c821865fd7068f76aeeba4ea475e874e285d4db2e7"
+      }
+    },
+    "github_and_zip_exe_match_local": true,
+    "public_download_verified": true,
+    "http_range_verified": true,
+    "other_homepage_content_identical": true,
+    "server_versions_retained": [
+      "3.1.2",
+      "3.1.1",
+      "3.1.0",
+      "3.0.0",
+      "2.3.2"
+    ]
+  },
+  "public_legacy_client_upgrade": {
+    "version": "3.1.2",
+    "public_legacy_client_upgrades": [
+      {
+        "original_version": "3.1.0",
+        "original_exe_sha256": "85146a60fa0ee3c32a005c25575664c6365e5973931c1f1212564828d73dbe9d",
+        "updated_version": "3.1.2",
+        "updated_exe_sha256": "744702be16b40d88797b26bc724890ce13a02e4d47f81446f56daf84512771c5",
+        "public_sources_used": true,
+        "unmodified_old_updater": true,
+        "automatic_restart_passed": true,
+        "legacy_restart_confirmation_once": true,
+        "settings_preserved": true,
+        "monitors_remained_stopped": true,
+        "installation_path": "ASCII-only independent test directory"
+      }
+    ],
+    "user_codex_windows_operated": false,
+    "aborted_300_probe": {
+      "probe": "3.0.0 aborted because isolated settings are unsupported",
+      "recorded_action_lines_during_probe": 0,
+      "watchers_stopped_and_test_process_terminated": true
+    },
+    "claude_login_or_terminal_input_performed": false,
+    "control_bundle_changed": false
+  },
   "control_bundle_modified_by_this_task": false
 }

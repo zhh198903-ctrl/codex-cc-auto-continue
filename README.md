@@ -8,6 +8,8 @@ Control continues using its built-in Auto-Continue, managed by the Control packa
 
 Version 3.1.2 also isolates startup between release versions so existing independent 3.0.0/3.1.0 updaters can reopen the replaced EXE without inheriting a deleted temporary runtime. A legacy updater may still display its existing restart confirmation once; 3.1.1 and later complete Update now without a second confirmation.
 
+If an old independent EXE cannot complete an update from a Unicode installation path, close it and replace it once with the current standalone download. Subsequent updates use the repaired helper. This instruction does not apply to Control's built-in copy.
+
 ## Local Control API revision 1
 
 Version 3.1.0 includes the Codex companion API for Codex Claude Control: sessions, typed actions, operation results, context and SSE. The CLI backend and native driver are maintained here and mirrored into Control with a SHA-256 manifest. A 60-second per-provider/thread lease suspends automatic approvals and permission-mode changes while retaining configured recovery and follow-ups. Confirmed follow-ups consume the budget once; uncertain writes pause the target. Bundled copies update with the full Control package. This release includes the Control integration. Validation covers the source regressions and the packaged local API; complete Control-client acceptance is tracked separately.

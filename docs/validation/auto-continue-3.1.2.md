@@ -14,4 +14,10 @@ Completed checks:
 - The packaged local API reported 3.1.2, required authentication, enforced recent-count bounds and separate text consent, and reported all monitors stopped in the isolated verification profile.
 - The 3.1.1 Unicode-path one-click upgrade and monitor restoration remain covered by their real EXE evidence and unchanged application update code. Public old-client upgrades to 3.1.2 are recorded after publication in `docs/release/3.1.2-verification.json`.
 
-User Codex windows were not operated. Claude login and live driver behavior were not exercised. Control was notified separately about its built-in update UI and keeps its own package.
+User Codex windows were not operated. No Claude login or terminal input was performed. Control was notified separately about its built-in update UI and keeps its own package.
+
+Public acceptance completed: the unmodified published 3.1.0 standalone EXE discovered 3.1.2, downloaded it from the public sources, retained its old restart confirmation once, replaced itself and automatically reopened as 3.1.2. The installed hash matched the local/GitHub/dlweb EXE, settings survived and all monitors stayed stopped. The tested legacy installation path contained ASCII characters; an old updater whose own batch cannot parse a Unicode installation path may still need a one-time manual replacement. The repaired updater then supports those paths for subsequent updates.
+
+The optional 3.0.0 client probe was aborted because that published build did not honor the isolated test-profile environment. Its watchers were stopped and the recorded test process was terminated; no action entries were recorded during the probe. It is not counted as a passed native 3.0.0 upgrade test. No Claude login or terminal input was performed.
+
+GitHub and dlweb downloads were verified against the installed EXE. Full ZIP CRC, SHA-256, file sizes and HTTP 206 checks passed. Both server product directories retain the latest five numeric versions; all 27 public homepage download links remained reachable and other homepage content stayed byte-identical. See the accompanying JSON for exact hashes and source commit.
