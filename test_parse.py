@@ -502,7 +502,7 @@ for i, (text, expected) in enumerate(switch_model_samples):
 # The local API reports WHICH kind of waiting a window is in, because the
 # answers differ: an ordinary chooser and a permission prompt both take Enter,
 # the limit picker's other option costs money and must never be auto-answered,
-# and the switch-model dialog belongs to the recovery script. Classifying by
+# and the switch-model dialog changes the model, so it is the user's. Classifying by
 # "is it a chooser" alone would flatten all four into one and lose exactly the
 # distinction that decides what is safe to do about it.
 _CN = chr(0x276F)
@@ -1136,52 +1136,6 @@ check_reset("a non-existent local time (spring forward) still yields a time",
             _ok2)
 
 
-
-# ---------------------------------------------------------------------------
-# Per-model quota banner
-# ---------------------------------------------------------------------------
-# Deliberately narrow: this pattern gates a feature that changes which model a
-# session runs on, so a false positive is expensive. Every string is split so
-# this file cannot trip the detector it is testing.
-print()
-print("---- per-model quota ----")
-
-_Q_YES = [
-    # The real thing, captured from a live session on 2026-08-14. Split so
-    # this file cannot trip the detector it is testing.
-    ("the real banner",
-     "You" + "'ve reached your Fable 5 " + "limit. Run /usage-credits to "
-     "continue or switch models with /model."),
-    ("shorter phrasing, same remedy",
-     "You have reached your Opus " + "limit — switch models with /model"),
-    ("credits-only wording",
-     "Reached your Sonnet 4.5 " + "limit. Run /usage-credits to continue."),
-]
-_Q_NO = [
-    # The 5-hour limit stops every model at once, so no switch helps and
-    # this must never be mistaken for it.
-    ("the 5-hour session limit",
-     "You" + "'ve hit your session " + "limit · " + "resets 3pm "
-     "(Asia/Shanghai)" + chr(10) + "/up" + "grade to increase your usage limit"),
-    ("ordinary chatter about limits and models",
-     "we hit the rate " + "limit yesterday, switch models if it recurs"),
-    ("a model named with no limit at all",
-     "switching to Opus 5 now that the tests pass"),
-    ("remedy present but no limit reached",
-     "you can switch models with /model at any time"),
-]
-for label, txt in _Q_YES:
-    check_reset("quota banner recognised: " + label,
-                ac.parse_model_quota(txt))
-for label, txt in _Q_NO:
-    check_reset("NOT a quota banner: " + label,
-                not ac.parse_model_quota(txt))
-
-# Stale banners scrolled far up are history, like every other detector here.
-check_reset("a quota banner far above the tail is stale",
-            not ac.parse_model_quota(
-                "Fable 5 weekly " + "limit · " + "resets Monday"
-                + chr(10) + ("x" * 4000)))
 
 print("---- key specs are summarised, never quoted ----")
 # The log records what this tool did, not what a session holds. /keys can

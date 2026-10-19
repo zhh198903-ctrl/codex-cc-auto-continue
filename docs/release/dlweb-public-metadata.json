@@ -4,7 +4,7 @@
     "display": "Codex/CC Auto-Continue",
     "tagline": "Codex 与 Claude 的 Windows 自动续接工具",
     "desc": "支持 Codex 桌面版、Codex CLI 和 Claude CLI 的独立监测。",
-    "detail": "Codex EXE、Codex CLI 和 Claude CLI 通过三个切换栏使用各自设置，活动日志固定在底部。Codex 桌面最近活动默认显示 5 个，可自定义；每个会话可独立设置模型、推理强度和完成后续接。支持额度恢复与有限网络重试，权限默认完全访问，自动工具权限批准默认开启，也可改为等待人工批准。最近活动支持配置；自动输入只作用于核实的当前可见 Codex 会话，不监测 ChatGPT 普通聊天或 Work 会话。单文件免安装。 3.1.0 新增配套程序调用的 Codex 会话接口、操作回执及事件通知；同一会话的多个窗口合并处理，操作结果不明确时暂停，避免重复发送。会话正文读取仍需单独开启。 3.1.1 修复独立 EXE 在中文或特殊字符目录下的升级，一次点击完成校验、替换和重启，保留设置及监测开关；Control 继续使用其内置副本。 3.1.2 修复旧独立版本首次升级后可能出现的 Python DLL 启动错误。",
+    "detail": "Codex EXE、Codex CLI 和 Claude CLI 通过三个切换栏使用各自设置，活动日志固定在底部。Codex 桌面最近活动默认显示 5 个，可自定义；每个会话可独立设置模型、推理强度和完成后续接。支持额度恢复与有限网络重试，权限默认完全访问，自动工具权限批准默认开启，也可改为等待人工批准。最近活动支持配置；自动输入只作用于核实的当前可见 Codex 会话，不监测 ChatGPT 普通聊天或 Work 会话。单文件免安装。 3.1.0 新增配套程序调用的 Codex 会话接口、操作回执及事件通知；同一会话的多个窗口合并处理，操作结果不明确时暂停，避免重复发送。会话正文读取仍需单独开启。 3.1.1 修复独立 EXE 在中文或特殊字符目录下的升级，一次点击完成校验、替换和重启，保留设置及监测开关；Control 继续使用其内置副本。 3.1.2 修复旧独立版本首次升级后可能出现的 Python DLL 启动错误。 3.2.0 精简 Claude CLI：删除模型恢复，被安全拦截或模型额度用完的会话原样等待处理、不再自动输入；Claude Code 退出后留下的终端不再拖慢每轮监测。",
     "tags": [
       "Codex EXE",
       "Codex CLI",
@@ -44,7 +44,7 @@
     "display_en": "Codex/CC Auto-Continue",
     "tagline_en": "A Windows auto-continue companion for Codex and Claude",
     "intro_en": "Codex desktop, Codex CLI and Claude CLI have separate settings in three tabs, with the activity log at the bottom. Desktop recent activities default to five and are configurable, with per-session model, effort and follow-ups. Supports quota recovery and bounded network retries. Full access and automatic tool approval are defaults; manual approval is available. Recent activities can be configured; automatic input requires a verified visible Codex conversation. ChatGPT chats and Work conversations are excluded. Single file, no install.",
-    "detail_en": "Codex desktop, Codex CLI and Claude CLI have separate settings in three tabs, with the activity log at the bottom. Desktop recent activities default to five and are configurable, with per-session model, effort and follow-ups. Supports quota recovery and bounded network retries. Full access and automatic tool approval are defaults; manual approval is available. Recent activities can be configured; automatic input requires a verified visible Codex conversation. ChatGPT chats and Work conversations are excluded. Single file, no install. Version 3.1.0 adds Codex session access, operation receipts and event notifications for companion programs. Multiple windows for one session are handled together; uncertain operations pause to avoid repeated sends. Reading conversation text still requires separate opt-in. Version 3.1.1 repairs standalone EXE updates in folders with Unicode or special characters, completing verification, replacement and restart in one action while retaining settings and monitor switches. Control continues using its built-in copy. Version 3.1.2 fixes a possible Python DLL startup error after the first update from older standalone releases.",
+    "detail_en": "Codex desktop, Codex CLI and Claude CLI have separate settings in three tabs, with the activity log at the bottom. Desktop recent activities default to five and are configurable, with per-session model, effort and follow-ups. Supports quota recovery and bounded network retries. Full access and automatic tool approval are defaults; manual approval is available. Recent activities can be configured; automatic input requires a verified visible Codex conversation. ChatGPT chats and Work conversations are excluded. Single file, no install. Version 3.1.0 adds Codex session access, operation receipts and event notifications for companion programs. Multiple windows for one session are handled together; uncertain operations pause to avoid repeated sends. Reading conversation text still requires separate opt-in. Version 3.1.1 repairs standalone EXE updates in folders with Unicode or special characters, completing verification, replacement and restart in one action while retaining settings and monitor switches. Control continues using its built-in copy. Version 3.1.2 fixes a possible Python DLL startup error after the first update from older standalone releases. Version 3.2.0 streamlines Claude CLI: model recovery is removed, so a session blocked by safeguards or out of its model allowance waits for you with nothing typed, and a terminal where Claude Code has exited no longer slows each pass.",
     "tags_en": [
       "Codex desktop",
       "Codex CLI",
@@ -85,8 +85,8 @@
       "label_en": "AI Skills · Claude Code / Codex",
       "tagline": "让 AI 助手自己去读 Auto-Continue 的日志",
       "tagline_en": "Lets your AI assistant read Auto-Continue's log",
-      "note": "Claude Code 和 Codex 都可以安装此可选技能，读取活动日志并排查配置。v3.1.2 主程序支持 Codex EXE、Codex CLI 和 Claude CLI 的独立监测；运行主程序不依赖技能。",
-      "note_en": "Both Claude Code and Codex can use this optional skill to read logs and diagnose settings. The v3.1.2 executable independently watches Codex desktop, Codex CLI and Claude CLI. The executable does not require the skill.",
+      "note": "Claude Code 和 Codex 都可以安装此可选技能，读取活动日志并排查配置。v3.2.0 主程序支持 Codex EXE、Codex CLI 和 Claude CLI 的独立监测；运行主程序不依赖技能。",
+      "note_en": "Both Claude Code and Codex can use this optional skill to read logs and diagnose settings. The v3.2.0 executable independently watches Codex desktop, Codex CLI and Claude CLI. The executable does not require the skill.",
       "license": "MIT 开源 · 免费",
       "license_en": "MIT licensed · free",
       "installs": [
@@ -102,6 +102,21 @@
     }
   },
   "changelog": {
+    "3.2.0": {
+      "date": "2026-10-19",
+      "items": [
+        {
+          "t": "improve",
+          "zh": "Claude CLI 删除模型恢复（安全拦截时切到备用模型、/compact 后切回，以及模型额度用完自动换模型）。这类会话改为原样等待处理，不再自动输入；曾开启该功能的，首次启动时日志提示一次。",
+          "en": "Removes Claude CLI model recovery (switching a session blocked by safeguards to a fallback model, compacting and switching back, and switching models when one model allowance runs out). Such sessions now wait for you with nothing typed; anyone who had it on is told once in the log."
+        },
+        {
+          "t": "improve",
+          "zh": "精简 Claude CLI 监测：Claude Code 退出后留下的终端不再让每轮多等 2 秒，并去掉无用的旧设置页和旧版迁移。限额续接、网络重试、选择框与权限回答、After finish 行为不变。",
+          "en": "Streamlines Claude CLI monitoring: a terminal where Claude Code has exited no longer adds a two-second wait to every pass, and an unused settings page and an old migration are removed. Limit resume, network retries, chooser and permission answers and After finish are unchanged."
+        }
+      ]
+    },
     "3.1.2": {
       "date": "2026-10-18",
       "items": [
@@ -194,21 +209,6 @@
           "t": "improve",
           "zh": "GitHub 仓库更名为 Codex/CC Auto-Continue，程序更新与源码链接同步使用新地址。",
           "en": "The GitHub repository is renamed Codex/CC Auto-Continue, with updater and source links aligned to the new address."
-        }
-      ]
-    },
-    "2.3.2": {
-      "date": "2026-10-03",
-      "items": [
-        {
-          "t": "fix",
-          "zh": "修复 Codex 桌面 App 在限额期间只填入 continue、发送恢复可用后仍未提交的问题。",
-          "en": "Retains the pending Codex desktop follow-up while Send is unavailable and submits it when native Send becomes usable."
-        },
-        {
-          "t": "fix",
-          "zh": "消息确认提交后才计入重试或跟进次数；修改草稿、切换聊天、跳过或排除窗口会取消待发送。",
-          "en": "Counts retries and follow-ups only after submission is confirmed. Editing the draft, switching chats, Skip or Exclude cancels the pending send."
         }
       ]
     }

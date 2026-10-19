@@ -1,12 +1,23 @@
 ---
 name: auto-continue
-description: 排查和配置 Auto-Continue —— Claude Code 在 Windows 上的看门狗。看懂它的活动日志（每行都带窗口 id）、判断某个会话为什么没被接上、配置模型恢复与「跑完接下一棒」、把日志脱敏后发给作者。触发词：auto-continue, 自动继续, 会话卡住没人管, 5 小时限制没恢复, 窗口没被接上, activity.log, 看门狗, watchdog, 模型恢复, after-finish, 导出日志反馈。
+description: 排查和配置 Auto-Continue —— Claude Code 在 Windows 上的看门狗。看懂它的活动日志（每行都带窗口 id）、判断某个会话为什么没被接上、配置「跑完接下一棒」、把日志脱敏后发给作者。触发词：auto-continue, 自动继续, 会话卡住没人管, 5 小时限制没恢复, 窗口没被接上, activity.log, 看门狗, watchdog, 安全拦截, after-finish, 导出日志反馈。
 ---
 
 # Auto-Continue
 
 Claude Code 的 Windows 看门狗：盯着「窗口停下来了」并替用户推下去。
 单文件免安装，MIT 开源、免费、可商用。
+
+### 3.2.0 Claude CLI 精简
+
+3.2.0 删除了 Claude CLI 的**模型恢复**（被安全拦截时切到备用模型、跑完 `/compact`
+再切回，以及额度用完自动换模型、把窗口拉回目标模型）。被安全拦截或模型额度用完的会话
+现在**原样等人处理**：不打任何字，after-finish 也不把它当成「跑完了」，安全拦截的选择框和
+*Switch model?* 对话框永远不会被自动回车。以前开着模型恢复的人，首次启动时日志会写一次
+`model recovery was removed in 3.2.0 and no longer runs`；旧设置原样留着不再读取。
+同版还去掉了「有已知窗口没列出来就等 2 秒再列一遍」这一步（它会让退出 Claude 后留下的
+终端每轮都白等 2 秒）、v2.0.6 的 after-finish 迁移和设置对话框里没用的 General 页。
+限额、网络、选择框、after-finish、模型/effort 覆盖、Triggers 和本机接口行为与 3.1.2 相同。
 
 ### 3.1.1 独立 EXE 升级
 
@@ -89,11 +100,13 @@ Windows 的 UI Automation 偶尔会拒绝一个窗口，这时它**什么都没�
 3. **正在输出的会话** —— 到点的 `continue` 会等它安静下来再发，日志写
    `is due but the session is mid-turn; holding the 'continue' until it goes quiet`。
    这不是卡住，是刻意的。
-4. **切换模型的对话框** —— 属于「模型恢复」那套流程，不会被当成普通选择框顺手回车。
+4. **安全拦截和切换模型的对话框** —— 安全拦截提示（`… safeguards flagged …`）不打任何字；
+   它附带的选择框和 *Switch model?* 对话框回车就会换模型，那是用户的决定，永远不自动回车。
+   模型额度用完（`You've reached your <模型> limit …`）同样原样留给用户——3.2.0 起不再自动换模型。
 4b. **输入框里有没发出的字，或者有问题/权限提示开着**（2.1.4 起）——
-   网络 `continue`、限额恢复、after-finish、模型恢复都**先等着**，日志写一次
+   网络 `continue`、限额恢复、after-finish 都**先等着**，日志写一次
    `… but the input box holds unsent text` / `a prompt is open and waiting for an answer`
-   或 `after-finish on … is held` / `Fable-recover: … holding`。
+   或 `after-finish on … is held`。
    打字总以回车结尾：接在草稿后面会一起提交，按在权限提示上等于选了「Yes」。
    用户把草稿发出去或清掉、把提示答掉，下一轮就照常发。**Fire now** 不受影响。
 5. **配套程序把自动回车关了** —— 日志 `api: settings auto_permission=off`
@@ -131,7 +144,7 @@ Windows 的 UI Automation 偶尔会拒绝一个窗口，这时它**什么都没�
    每个会话拖成独立窗口才都能被看住。
 2. **当时读得到屏幕吗** —— 附近有没有 `could not read the screen of #id`。
    偶发一两轮是 UIA 打嗝，会自己好（好了会写 `screen of #id readable again`）。
-   另一种是整个窗口这一轮没枚举到：`N open window(s) missing from this pass (#id …)`
+   另一种是整个窗口这一轮没枚举到：`N open window(s) missing from this pass (#id …; not readable as a Claude session right now)`
    —— 状态会保留，不会重来；2.1.2 起括号里写明是哪几个窗口，
    **同一个 id 反复出现**才值得查，零星几次是正常的。
    2.1.4 起窗口列表直接向 Windows 要，不再让 UIA 枚举整个桌面，
@@ -149,13 +162,7 @@ Windows 的 UI Automation 偶尔会拒绝一个窗口，这时它**什么都没�
    ——只移动视图，不往会话里打字。
 4. **发了但没送达吗** —— `retry send failed for …; will try again`
    说明按键没送出去（通常是发送瞬间焦点被别的窗口抢走），下一轮会自己重来。
-5. **模型额度用完（`You've reached your Fable limit …`）却没切模型** ——
-   「额度用完就切模型」只对**模型恢复作用范围内**的窗口生效：Advanced… → 模型恢复
-   里勾选的窗口，或勾 **All windows**。开关都开着但一个窗口都没选，它就永远不动。
-   2.1.2 起日志会直说：`… is out of quota on its model, but model recovery is not set
-   up for this window — not switching`；开着却没选窗口时会写
-   `model recovery is ON but applies to no window`。
-6. **是不是根本没到时间** —— `will fire at …` 那行写着预定时刻，
+5. **是不是根本没到时间** —— `will fire at …` 那行写着预定时刻，
    实际触发会晚一个轮询周期以内（默认 60 秒），这是正常的。
 
 ## 常用设置（Advanced…）
@@ -167,8 +174,8 @@ Windows 的 UI Automation 偶尔会拒绝一个窗口，这时它**什么都没�
   也是第一个该看的地方。
   自己改正则时别让几个可省略的空白（`\s*`）挨在一起：屏幕每行都用空格补满，
   这种写法在空屏上要算好几秒，而且每个窗口每轮都算一遍（2.1.4 前内置的安全拦截正则就是这样）。
-- **模型恢复** / **跑完接下一棒（after-finish）** —— 都是**默认关闭、按窗口开启**；
-  会自动打字的功能带次数上限，默认只跑一次，用完要手动再开。
+- **跑完接下一棒（after-finish）** —— **默认关闭、按窗口开启**；
+  带次数上限，默认只跑一次，用完要手动再开。
 
 ## 报问题给作者
 

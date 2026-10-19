@@ -515,21 +515,39 @@ class CodexGuiChecks(unittest.TestCase):
         self.assertEqual(controls['autostart'].isChecked(), original)
         dlg.deleteLater()
 
-    def test_claude_more_settings_are_scoped_and_exclude_codex_rows(self):
-        self.window._latest_snapshot = [dict(title='Claude project', provider='claude'),
-                                        dict(title='Codex project', provider='codex_app')]
+    def test_claude_more_settings_are_scoped(self):
         captured = {}
         real_dialog = gui.AdvancedDialog
-        def create(parent, cfg, windows, patterns, auto, general, **kw):
-            captured.update(windows=windows, scope=kw['scope'])
-            dlg = real_dialog(parent, cfg, windows, patterns, auto, general, **kw)
+        def create(parent, patterns, auto):
+            dlg = real_dialog(parent, patterns, auto)
             captured['tabs'] = [dlg._tabs.tabText(i) for i in range(dlg._tabs.count())]
             return dlg
         with patch.object(gui, 'AdvancedDialog', side_effect=create), patch.object(real_dialog, 'exec', return_value=QDialog.DialogCode.Rejected):
             self.window._open_advanced()
-        self.assertEqual(captured['scope'], 'claude')
-        self.assertEqual(captured['windows'], {'Claude project': 'Claude project'})
-        self.assertEqual(captured['tabs'], ['Answering', 'Model recovery', 'Triggers', 'Local API'])
+        self.assertEqual(captured['tabs'], ['Answering', 'Triggers', 'Local API'])
+
+    def test_removed_model_recovery_is_announced_once_and_its_store_kept(self):
+        # Someone upgrading with model recovery switched on is told once that
+        # it no longer runs. The stored settings stay where they are: an
+        # older copy sharing this store may still read them.
+        store = QSettings(str(Path(self.temp.name) / "legacy.ini"), QSettings.Format.IniFormat)
+        store.setValue("autostart", False)
+        legacy = json.dumps({"enabled": True, "all_windows": True, "steps": "continue"})
+        store.setValue("fable_cfg", legacy)
+        notes = []
+        for _ in range(2):
+            with patch.dict(os.environ, {"LOCALAPPDATA": self.temp.name}), \
+                    patch.object(gui, "QSettings", return_value=store):
+                win = IsolatedWindow()
+            win._log_path = None
+            notes.append([m for _, level, m in win._log_buffer
+                          if level == "warn" and "model recovery was removed" in m])
+            win.close()
+            self.app.processEvents()
+        self.assertEqual(len(notes[0]), 1)
+        self.assertEqual(notes[1], [])
+        self.assertEqual(store.value("fable_cfg"), legacy)
+        self.assertTrue(store.value("recovery_removed_noted", False, type=bool))
 
     def test_compact_row_menu_preserves_routing_and_pending_actions(self):
         self.select('codex_app')

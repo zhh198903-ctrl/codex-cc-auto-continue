@@ -29,7 +29,7 @@ import re as _re
 import sys
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -68,30 +68,29 @@ from PyQt6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog,
     QDialogButtonBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout,
     QHeaderView,
-    QFrame, QLabel, QScrollArea,
+    QLabel,
     QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
     QPlainTextEdit, QPushButton, QSpinBox, QSplitter, QStyle, QSystemTrayIcon, QToolButton,
     QTextBrowser,
-    QGridLayout, QTabWidget, QTableWidget, QTableWidgetItem, QVBoxLayout,
+    QTabWidget, QTableWidget, QTableWidgetItem, QVBoxLayout,
     QWidget,
 )
 
 from auto_continue import (
     APP_VERSION, MAX_POST_MATCH_TAIL, NETWORK_POST_MATCH_TAIL,
     PROMPT_POST_MATCH_TAIL, SCAN_TAIL_CHARS, SWITCH_POST_MATCH_TAIL,
-    TRIGGER_DEFAULTS,
-    TRIGGER_SPECS, compile_trigger_patterns, find_terminal_windows,
+    TRIGGER_SPECS, compile_trigger_patterns,
     init_uia_thread, list_tab_titles, next_reset_datetime,
-    current_model, fable_refusal_distance, fable_refusal_id,
+    fable_refusal_distance,
     chooser_signature, composer_has_draft,
     parse_chooser_prompt, parse_econnreset_stuck,
     classify_prompt,
-    parse_fable_picker, parse_model_quota, parse_permission_prompt,
+    parse_fable_picker, parse_permission_prompt,
     parse_limit_message,
     parse_limit_prompt, parse_oauth_expired, parse_retry_exhausted,
     parse_server_error_stuck, parse_switch_model_prompt, read_terminal_text,
     send_continue, send_keys, send_text_lines, session_running,
-    summarize_keyspec, terminal_window_from_handle, keyspec_problem,
+    summarize_keyspec, keyspec_problem,
     typing_hold_reason,
 )
 import updater
@@ -143,178 +142,22 @@ def title_key(title: str) -> str:
     return _re.sub(r"^[^\w]+", "", title or "").strip()
 
 
-# Fable recovery is an editable "step script" — one step per line:
-#   plain text (e.g. /model opus, continue) → type it + Enter
-#   <confirm> → wait for the "Switch model?" dialog, press Enter (= Yes)
-#   <esc>     → interrupt a running turn so the NEXT step lands as a command
-#               instead of being queued (Claude Code queues anything typed
-#               during a turn, and a queued /model never takes effect).
-#               Skipped when the session is idle or a dialog is showing (ESC
-#               would cancel it). No longer in the default script — the
-#               default never interrupts a turn; this exists for custom
-#               scripts that explicitly want it.
-#   <enter>   → press a bare Enter
-#   <wait> / <wait:N> → wait N seconds of RUNNING time (bare <wait> uses the
-#               configured Delay)
-#   <idle>    → wait until the current turn ENDS and the session stays quiet
-#   <resume>  → type the window's "After recovery" prompt ('continue' when
-#               none is set); types nothing on the parking run (see the
-#               resume-loops cap in the tick)
-#
-# Why this shape: a safeguard block judges the WHOLE conversation, not the
-# last message. Every request re-sends the full history, so when the history
-# itself is what trips the filter, re-running the same message on the target
-# model can never pass — no matter how long the fallback ran in between.
-# Measured live on 2026-08-09: four recoveries in one evening, every switch
-# back blocked again within seconds. The one move that changes the verdict
-# is /compact: it replaces the history with a summary and the flagged
-# content is gone — verified by hand on the same session, which ran clean on
-# the target immediately after compacting.
-#
-# So the script does exactly one cycle, with no early switch-backs:
-#   1. switch to the fallback and 'continue' — it FINISHES the blocked work.
-#      <idle> waits for the turn to actually end; nothing interrupts it,
-#      because a switch back before /compact is pointless by the above.
-#   2. /compact — the only step that clears a context-based block.
-#   3. only then switch back to the target and <resume>: fresh work on a
-#      compacted, clean context. Without a configured prompt, 'continue'
-#      picks the compacted summary back up.
-# The script must be able to switch off the blocked model BY ITSELF. Relying
-# on Claude Code to offer a picker was a single point of failure and it failed:
-# the current build just prints "try a different model with /model" and leaves
-# the session sitting on the model that refused. `/model opus` is skipped
-# automatically when the bar already reads Opus, so the picker shape — where
-# <confirm> has already done the switch — does not switch twice.
-DEFAULT_FABLE_STEPS = (
-    "<confirm>\n"
-    "/model opus\n"
-    "<confirm>\n"
-    "/effort max\n"
-    "continue\n"
-    "<idle>\n"
-    "/compact\n"
-    "<idle>\n"
-    "/model fable\n"
-    "<confirm>\n"
-    "<effort>\n"
-    "<resume>"
-)
+def coerce_after_finish_loops(stored) -> dict:
+    """title_key -> runs remaining (0 spent, -1 unlimited), from any input.
 
-# The v2.0.5 default: three escalating attempts that cut the fallback's turn
-# short (ESC + /model mid-turn), then one patient one — built on the premise
-# that a block is per-message and a retry might pass. A context-based block
-# never does: without /compact the flagged history rides along on every
-# retry, so each switch back was refused again within seconds (measured:
-# four for four). Replaced by the finish → /compact → switch-back script.
-LEGACY_FABLE_STEPS_V205 = (
-    "<confirm>\n"
-    "<esc>\n"
-    "/model opus\n"
-    "<confirm>\n"
-    "continue\n"
-    "<wait>\n"
-    "<esc>\n"
-    "/model fable\n"
-    "<confirm>\n"
-    "<resume>"
-)
-
-# The v2.0.4 default, which closed with a literal 'continue' — right action,
-# not configurable per window.
-LEGACY_FABLE_STEPS_V204 = (
-    "<confirm>\n"
-    "<esc>\n"
-    "/model opus\n"
-    "<confirm>\n"
-    "continue\n"
-    "<wait>\n"
-    "<esc>\n"
-    "/model fable\n"
-    "<confirm>\n"
-    "continue"
-)
-
-# The v1.0.16 default, which typed /model into the already-open picker and
-# then ESC'd it away. Saved settings take precedence over the built-in
-# default, so upgrading alone would leave every existing user on the broken
-# script forever. If the stored steps are byte-identical to this — i.e. the
-# user never edited them — they get migrated to the new default; a customised
-# script is always left alone.
-LEGACY_FABLE_STEPS_V1016 = (
-    "/model opus\n"
-    "<esc>\n"
-    "<confirm>\n"
-    "continue\n"
-    "<wait>\n"
-    "/model fable\n"
-    "<esc>\n"
-    "<confirm>\n"
-    "continue"
-)
-
-# The v2.0.1 default, which never switched AWAY from the target model. It
-# leaned on Claude Code offering a picker whose first option is the fallback,
-# so <confirm> did the switching. Claude Code stopped offering it: the
-# safeguard message is now plain text ("try a different model with /model"),
-# with nothing to confirm. Measured live on 2026-08-09: <confirm> timed out,
-# `/model fable` ran against a session already on Fable, and the closing
-# `continue` re-sent the blocked message to the model that had just refused
-# it — which was blocked again 7 seconds later. The run still reported
-# success, because the completion check only compared the end model.
-LEGACY_FABLE_STEPS_V201 = (
-    "<confirm>\n"
-    "<wait>\n"
-    "/model fable\n"
-    "<confirm>\n"
-    "continue"
-)
-
-# The first script that could switch away on its own, but ended on the switch
-# back with nothing after it. That was fine only while the switch waited for
-# the fallback's turn to finish; once switching mid-turn became the default,
-# it left the session parked at the prompt on the target model holding
-# half-done work. The closing 'continue' is what makes it pick that work up.
-LEGACY_FABLE_STEPS_V201_NOCONT = (
-    "<confirm>\n"
-    "/model opus\n"
-    "<confirm>\n"
-    "continue\n"
-    "<wait>\n"
-    "/model fable\n"
-    "<confirm>"
-)
-
-# The 8-step script: switched mid-turn, but without interrupting the turn
-# first. Claude Code queues everything typed while a turn runs, and a QUEUED
-# /model never takes effect — so the run spent its whole wait believing it was
-# on the fallback while the session had not left the target at all, and the
-# closing 'continue' was refused by the very model it was supposed to escape.
-LEGACY_FABLE_STEPS_V202 = (
-    "<confirm>\n"
-    "/model opus\n"
-    "<confirm>\n"
-    "continue\n"
-    "<wait>\n"
-    "/model fable\n"
-    "<confirm>\n"
-    "continue"
-)
-# Every shipped step script, newest first. A stored script that still
-# matches one of these was never edited by its owner, so it can be migrated
-# to the current default; anything else is left alone. Each entry needs its
-# own explanation, because they broke for different reasons and their
-# replacements fix different things — see _MIGRATION_REASONS.
-LEGACY_FABLE_SCRIPTS = {}     # filled in below, after the strings exist
-
-
-def migrate_fable_steps(stored):
-    """(steps, legacy_label) — rewrite an untouched shipped script.
-
-    Returns the stored value unchanged with a None label when the script is
-    customised, already current, or not a string at all.
+    The map round-trips through the settings store as JSON and through a
+    queued signal, so it can arrive as anything; a bad entry is dropped
+    rather than raised, because this runs on the worker thread and at start-up.
     """
-    label = LEGACY_FABLE_SCRIPTS.get(stored) if isinstance(stored, str) else None
-    return (DEFAULT_FABLE_STEPS, label) if label else (stored, None)
+    out = {}
+    if isinstance(stored, dict):
+        for k, v in stored.items():
+            try:
+                n = int(v)
+            except (TypeError, ValueError):
+                continue
+            out[str(k)] = max(-1, n)
+    return out
 
 
 def reconcile_loops(chosen: int, snapshot: int, fired):
@@ -335,28 +178,6 @@ def reconcile_loops(chosen: int, snapshot: int, fired):
     return fired
 
 
-def migrate_after_finish_loops(stored, already_migrated: bool):
-    """title_key -> runs remaining, out of whatever the registry holds.
-
-    v2.0.6 stored a CAP in this key, where 0 meant "unlimited". It now holds
-    runs REMAINING, where 0 means spent and -1 means unlimited — so a value
-    carried over from v2.0.6 without translation would silently stop a
-    prompt its owner had set to repeat forever. The rewrite is one-shot and
-    flagged, because after it 0 is a real, meaningful value.
-    """
-    out = {}
-    if isinstance(stored, dict):
-        for k, v in stored.items():
-            try:
-                n = int(v)
-            except (TypeError, ValueError):
-                continue
-            out[str(k)] = max(-1, n)
-    if not already_migrated:
-        out = {k: (-1 if v == 0 else v) for k, v in out.items()}
-    return out
-
-
 # Shipped defaults, in one place so first run and Reset agree.
 #   poll   60s — a UIA read of every window costs 100ms+, and nothing
 #                this tool reacts to needs sub-minute latency.
@@ -366,34 +187,6 @@ def migrate_after_finish_loops(stored, already_migrated: bool):
 #                old 30s default poked it ~180 times through a real
 #                90-minute outage, which helps nothing and buries the
 #                log; 600s is what a real deployment converged on.
-# The v2.0.6-2.0.15 default: the compact-based cycle, before effort was
-# raised for the rescue run. Registered so anyone still on the shipped script
-# is moved forward — a stored copy is indistinguishable from a customised one
-# unless it is named here, and an un-migrated user would simply never get the
-# new steps.
-LEGACY_FABLE_STEPS_V206 = (
-    "<confirm>" + chr(10) +
-    "/model opus" + chr(10) +
-    "<confirm>" + chr(10) +
-    "continue" + chr(10) +
-    "<idle>" + chr(10) +
-    "/compact" + chr(10) +
-    "<idle>" + chr(10) +
-    "/model fable" + chr(10) +
-    "<confirm>" + chr(10) +
-    "<resume>"
-)
-
-LEGACY_FABLE_SCRIPTS.update({
-    LEGACY_FABLE_STEPS_V206: "v2.0.6",
-    LEGACY_FABLE_STEPS_V1016: "v1.0.16",
-    LEGACY_FABLE_STEPS_V201: "v2.0.1",
-    LEGACY_FABLE_STEPS_V201_NOCONT: "v2.0.1a",
-    LEGACY_FABLE_STEPS_V202: "v2.0.2",
-    LEGACY_FABLE_STEPS_V204: "v2.0.4",
-    LEGACY_FABLE_STEPS_V205: "v2.0.5",
-})
-
 DEFAULT_INTERVAL_S = 60
 DEFAULT_BUFFER_S = 60
 DEFAULT_RETRY_S = 600
@@ -413,48 +206,8 @@ STALE_RESET_H = 6
 # take: after this long, the same chooser may be answered once more.
 CHOOSER_RETRY_S = 300
 
-SWITCH_SETTLE_S = 10       # if no dialog within this after a step, move on
-FABLE_RETICK_MS = 6000     # fast follow-up tick while a recovery is running
-# Every step is bounded. Without these a recovery can wedge a window: the
-# confirm step would press Enter on every tick for as long as the dialog text
-# stays in range, a <wait> would never expire while a stale network error sits
-# in the tail, and a failed send would advance as if it had succeeded.
-FABLE_CONFIRM_MAX_S = 30   # hard deadline for <confirm>, even after a dialog
-FABLE_KEY_GAP_S = 3        # min gap between repeated Enters on one dialog
-FABLE_SEND_RETRIES = 3     # re-attempts when a send can't reach foreground
-# <wait> banks only PRODUCTIVE time, so a network outage genuinely costs the
-# recovery nothing. This multiplier is the anti-wedge backstop on WALL time:
-# a stale error line that never scrolls away would otherwise bank nothing
-# forever and strand the session on the fallback model. Generous on purpose —
-# real outages here have run 36 and 90 minutes, and cutting a wait short
-# during one sends /model into a session that is still stuck.
-FABLE_WAIT_MAX_MULT = 20   # wall-time ceiling = N× the requested wait
-FABLE_STALE_RUN_S = 900    # a run older than this is abandoned, not resumed
-# <idle>: the turn is over only after the session has stayed quiet this
-# long. The spinner drops out between tool calls, so a single not-running
-# reading is a flicker, not a finish (same reasoning as AFTER_FINISH_SETTLE_S).
-FABLE_IDLE_SETTLE_S = 90
-# ...and bounded on wall time. Finishing the remaining work on the fallback
-# can genuinely take an hour-plus, so this is generous; past it the run
-# moves on with a warning rather than pinning the window forever.
-FABLE_IDLE_WALL_S = 7200
-# How long the notice must stay gone before the episode counts as over.
-# Re-arming has to be instant so a fresh block is picked up, but declaring
-# success must not be: between one block and the next the notice can drop out
-# of the tail window for a single tick, and treating that as "cleared" reset
-# the run counter — which silently refills the per-window resume-loops
-# budget mid-episode and turns the parking cap into no cap at all.
-FABLE_CLEARED_S = 120
-# The verdict on a finished run is judged this long AFTER the last step, not
-# at it. The closing 'continue' takes a few seconds to be accepted or refused,
-# and judging 2 seconds in reported "done" for runs whose refusal simply had
-# not printed yet — the retry still fired off the request id a tick later, but
-# the log had already lied.
-FABLE_VERDICT_DELAY_S = 30
-# While the session is streaming, the verdict waits (the turn IS the evidence:
-# a refusal ends it within seconds, real work keeps it running). Bounded — a
-# turn still going this long after the run means the block did not stop it.
-FABLE_VERDICT_MAX_S = 600
+# Fast follow-up tick after answering a chooser: questions come in runs.
+RETICK_MS = 6000
 
 # "After finish": how long a session must sit idle before its configured
 # follow-up prompt is typed. Long enough that a redraw gap or the user
@@ -470,178 +223,11 @@ AFTER_FINISH_SETTLE_S = 90
 SCROLLED_AWAY_RE = _re.compile(r"Jump\s+to\s+bottom\b")
 SCROLLED_AWAY_TAIL = 1500
 
-# How long to wait before re-listing windows when a known, still-open one
-# went missing from a pass (see Watcher._enumerate_settled). Two seconds is
-# what the external coverage monitor settled on: long enough for the hiccup to
-# pass, short enough not to hold the watcher thread noticeably.
-_ENUM_RETRY_WAIT_S = 2.0
-
 # A window scrolled away from its live bottom is skipped (it cannot be read),
 # so left scrolled it would be skipped for good. After this long it is sent
 # Claude Code's own "jump to bottom" key and is watched again. 0 = never.
 DEFAULT_SCROLL_BACK_MIN = 60
 SCROLL_TO_BOTTOM_KEYS = "{Ctrl}{End}"
-# A handled notice drifts further from the tail as the session prints, so a
-# match much CLOSER than the furthest we've seen is a genuinely new block.
-#
-# The margin is NOT cosmetic, and "distance only grows" is only true in the
-# large. What we read is a live terminal viewport, not an append-only log:
-# modals opening and closing rewrite the trailing rows, so the distance
-# oscillates. Measured across two real recoveries on this session:
-#     run 3: 732 -> 1083 -> 939 -> 981 -> 1083   (shrank 144)
-#     run 4: 878 -> 1017 -> 837 -> 1017 -> 1119  (shrank 180)
-# Worst real shrink was 180 chars, so 400 leaves ~2.2x headroom. Tightening
-# this below ~250 would make ordinary redraws read as a fresh block and
-# re-trigger the recovery on every one — do not "optimise" it without
-# re-measuring against captured snapshots.
-FABLE_FRESH_MARGIN = 400
-
-# Sitting on the fallback model is NOT an acceptable resting state: the
-# whole point of enabling the recovery is to keep working on the chosen
-# model. A run can end off-target (a switch-back that never landed, or
-# Claude Code switching by itself and the notice scrolling away), and
-# nothing used to bring it home — the window just stayed on the fallback
-# indefinitely. So when a window is opted in, its script names a target via
-# a /model step, and the status bar shows something else with no safeguard
-# notice in sight, steer it back.
-FABLE_DRIFT_GRACE_S = 120  # leave a finished run alone this long first
-FABLE_DRIFT_RETRY_S = 300  # min gap between correction attempts
-FABLE_DRIFT_MAX = 6        # corrections per streak, all waiting for idle
-# A model change observed while this tool sent nothing is the USER doing
-# it by hand. That is an instruction, not a fault to repair: stop enforcing
-# the target on that window and untick it, rather than switching it back
-# and turning the feature into something that fights its owner.
-FABLE_USER_SWITCH_QUIET_S = 120   # our keystrokes count as ours this long
-# A /model step never lands inside a running turn. A queued /model does not
-# take effect, and cutting the fallback's turn short is pointless anyway:
-# until /compact has run, the flagged history rides along on every retry, so
-# an early switch back only buys another refusal. Drift corrections wait for
-# the same reason — a mid-turn switch is bounced straight back when Claude
-# Code re-flags the message.
-#
-# A drift streak has to mean corrections in a row. A correction hours after
-# the last one is a fresh problem, not the continuation of an old streak, so
-# the count decays: a gap longer than this starts over. Without it the
-# counter only ever climbed toward FABLE_DRIFT_MAX off the back of unrelated
-# corrections days apart. A switch the user made by hand is already
-# excluded, because that unticks the window instead of counting as a bounce.
-FABLE_BOUNCE_WINDOW_S = 900
-# The wait for a busy session is itself bounded — a turn that never ends must
-# not pin the recovery, and switching late still beats never switching. Kept
-# below FABLE_STALE_RUN_S so the switch happens before the stale-run guard
-# abandons the run out from under it.
-FABLE_IDLE_MAX_S = 600
-
-
-def _model_step_target(arg):
-    """The model name a `/model X` step asks for, or None for other steps."""
-    s = str(arg or "").strip()
-    if not s.lower().startswith("/model"):
-        return None
-    parts = s.split()
-    return parts[1] if len(parts) > 1 else None
-
-
-def _model_matches(bar_model, want) -> bool:
-    """True if the status bar already reads the model a step asks for.
-
-    The bar carries a version and sometimes a variant ("Opus 5 (1M context)")
-    while the script says "opus", so this is a prefix test on the first word —
-    not equality. Nothing matches an unreadable bar: acting is the safe answer
-    when we cannot tell where the session is.
-    """
-    if not bar_model or not want:
-        return False
-    return str(bar_model).strip().lower().startswith(
-        str(want).strip().lower())
-
-
-def _last_model_step(steps):
-    """Model name from the LAST `/model X` line in a step script, if any.
-
-    That is what the run is meant to end on, so it is what the completion
-    check compares the status bar against.
-    """
-    want = None
-    for kind, arg in steps or ():
-        if kind == "send" and str(arg).strip().lower().startswith("/model"):
-            parts = str(arg).split()
-            if len(parts) > 1:
-                want = parts[1]
-    return want
-
-
-def _fable_fallback_model(steps):
-    """Model name from the FIRST `/model X` line in a step script, if any.
-
-    The mirror of `_last_model_step`: a recovery script switches AWAY to the
-    fallback first and back to the target last, so the first step names the
-    model that is expected to still work. Read from the script rather than
-    hard-coded so a user who rewrote the script gets their own choice — and
-    so a script with no `/model` line at all yields None, which the caller
-    treats as "nowhere to go" rather than guessing.
-    """
-    for kind, arg in steps or ():
-        if kind == "send" and str(arg).strip().lower().startswith("/model"):
-            parts = str(arg).split()
-            if len(parts) > 1:
-                return parts[1]
-    return None
-
-
-def _fable_reset(st) -> None:
-    """Return a window to 'no recovery in flight'. Deliberately leaves
-    `fable_handled` / `fable_runs` alone — those track whether we already
-    tried for the CURRENT notice and are cleared only when it clears."""
-    st.fable_step = -1
-    st.fable_step_at = None
-    st.fable_dlg_seen = False
-    st.fable_tries = 0
-    st.fable_wait_from = None
-    st.fable_wait_acc = 0.0
-    st.fable_wait_last = None
-    st.fable_idle_since = None
-    st.fable_idle_from = None
-    st.fable_park = False
-    st.fable_last_key_at = None
-    st.fable_picker_used = False
-    st.fable_restore = None
-    # Arming a new run goes through here, so a verdict still pending from the
-    # previous run is dropped — the new run's own logging tells that story.
-    st.fable_verdict_at = None
-    st.fable_verdict_want = None
-
-
-def _parse_recovery_steps(text: str) -> list:
-    """Parse the recovery step-script into a list of (kind, arg) tuples."""
-    steps = []
-    for raw in (text or "").splitlines():
-        s = raw.strip()
-        if not s:
-            continue
-        low = s.lower()
-        if low == "<confirm>":
-            steps.append(("confirm", None))
-        elif low == "<esc>":
-            steps.append(("esc", None))
-        elif low == "<enter>":
-            steps.append(("enter", None))
-        elif low == "<resume>":
-            steps.append(("resume", None))
-        elif low == "<effort>":
-            steps.append(("effort", None))
-        elif low == "<idle>":
-            steps.append(("idle", None))
-        elif low == "<wait>":
-            steps.append(("wait", None))
-        elif low.startswith("<wait:") and low.endswith(">"):
-            try:
-                steps.append(("wait", max(0, int(low[6:-1]))))
-            except ValueError:
-                steps.append(("wait", None))
-        else:
-            steps.append(("send", s))
-    return steps
 
 
 # ===========================================================================
@@ -657,7 +243,6 @@ ST_COOLDOWN = "cooldown"  # Inside post-send cooldown window.
 ST_EXCLUDED = "excluded"  # User chose to ignore this window.
 ST_RETRY = "retry"        # Network retries exhausted, resending continue.
 ST_PROMPT = "prompt"      # Limit picker open, confirming with Enter.
-ST_FABLE = "fable"        # Recovering from a Fable safeguard block.
 
 
 def _wid(hwnd: int) -> str:
@@ -683,8 +268,8 @@ def redact_log_line(line: str) -> str:
 
     The activity log is safe to keep locally and unsafe to hand over as-is: a
     Claude Code window is named after its conversation, so the titles alone
-    disclose the projects and tasks on this machine, and the after-finish and
-    resume prompts are the user's own words typed verbatim into the log.
+    disclose the projects and tasks on this machine, and the after-finish
+    prompts are the user's own words typed verbatim into the log.
 
     What survives is what a diagnosis actually needs — the timestamp, the
     level, the sentence, the window id, and literal slash commands, none of
@@ -719,8 +304,8 @@ def _hwnd_alive(hwnd: int) -> bool:
         return bool(user32.IsWindow(ctypes.c_void_p(int(hwnd))))
     except Exception:
         # Can't tell. A stale row costs a line in the table; dropping live
-        # state loses an in-flight recovery, so the lossy option is not the
-        # default.
+        # state loses a pending limit or a send cooldown, so the lossy option
+        # is not the default.
         return True
 
 
@@ -842,8 +427,8 @@ class _WState:
     prompt_at: Optional[datetime] = None
     # When this window's screen was last read, by a pass or a rescan.
     read_at: Optional[datetime] = None
-    # Interactive limit-picker ("What do you want to do?") bookkeeping.
-    prompt_last_sent_utc: Optional[datetime] = None
+    # The limit picker ("What do you want to do?") is on screen; its warning
+    # has been logged for this episode.
     prompt_active: bool = False
     # One line per hold (see typing_hold_reason), not one per pass.
     hold_logged: bool = False
@@ -854,27 +439,6 @@ class _WState:
     # table; warn-once flag for the log.
     tab_count: int = 1
     tabs_warned: bool = False
-    # Fable refusal-recovery bookkeeping (opt-in windows). Step-script driven.
-    fable_step: int = -1                          # -1 idle, else step index
-    fable_step_at: Optional[datetime] = None      # when the current step began
-    fable_dlg_seen: bool = False                  # confirmed a Switch dialog
-    fable_handled: bool = False                   # latch (until notice clears)
-    fable_tries: int = 0                          # failed sends on this step
-    fable_wait_from: Optional[datetime] = None    # absolute <wait> start
-    fable_wait_acc: float = 0.0                   # productive secs banked
-    fable_wait_last: Optional[datetime] = None    # previous <wait> tick
-    fable_idle_since: Optional[datetime] = None   # <idle>: quiet since when
-    fable_idle_from: Optional[datetime] = None    # <idle>: wall-clock start
-    fable_park: bool = False                      # final run: <resume> muted
-    fable_last_key_at: Optional[datetime] = None  # rate-limit repeated Enter
-    fable_runs: int = 0                           # cycles armed this episode
-    fable_tried: int = 0                          # cycles that TYPED the prompt
-    fable_parked: bool = False                    # a parking cycle completed
-    fable_notice_dist: Optional[int] = None       # tail-distance when latched
-    fable_notice_id: Optional[str] = None         # request id of that notice
-    fable_clear_since: Optional[datetime] = None  # notice absent since when
-    fable_verdict_at: Optional[datetime] = None   # run finished, verdict due
-    fable_verdict_want: Optional[str] = None      # model that run aimed for
     af_seen_running: bool = False                 # ran since the last fire
     af_idle_since: Optional[datetime] = None      # idle streak start
     af_spent_logged: bool = False                 # budget-spent said once
@@ -882,19 +446,6 @@ class _WState:
     chooser_at: Optional[datetime] = None         # when we answered it
     chooser_warned: bool = False                  # said "couldn't" once
     chooser_seen_sig: Optional[str] = None        # chooser that warning is for
-    fable_picker_used: bool = False               # picker accepted this run
-    fable_hold_logged: bool = False               # 'waiting for idle' said once
-    fable_drift_at: Optional[datetime] = None     # last drift correction
-    fable_drift_runs: int = 0                     # corrections since on-target
-    fable_restore: Optional[list] = None          # one-off restore script
-    fable_last_model: Optional[str] = None        # model seen last tick
-    quota_hold: bool = False                      # held off an empty quota
-    quota_at: Optional[datetime] = None           # when we moved
-    fable_acted_at: Optional[datetime] = None     # last keystroke WE sent
-    fable_user_optout: bool = False               # user took manual control
-    fable_our_models: set = field(default_factory=set)  # models we typed
-    fable_scope_key: Optional[str] = None         # key we matched scope on
-    scope_warned: bool = False                    # 'not in scope' said once
     scrolled_away: bool = False                   # view not at the live bottom
     scrolled_since: Optional[datetime] = None     # when it was first seen so
 
@@ -907,9 +458,6 @@ class Watcher(QObject):
 
     # snapshot is a list[dict] — see _make_snapshot for the schema.
     snapshot = pyqtSignal(list)
-    # Emitted with a title_key when the user has taken manual control of
-    # a window's model and it should be dropped from the recovery scope.
-    fable_untick = pyqtSignal(str)
     # (title_key, runs left) after an after-finish prompt spent one. The GUI
     # owns persistence, so the remaining count survives a restart — which is
     # the whole point of counting down rather than up.
@@ -950,26 +498,6 @@ class Watcher(QObject):
         self._retry_interval = 30
         self._dry_run = False
 
-        # Fable refusal-recovery config (opt-in per window; see AdvancedDialog).
-        self._fable_enabled = False
-        # Opt-in: finish on the fallback when the target model's own
-        # allowance runs dry, instead of waiting days for it to reset.
-        self._fable_quota_switch = False
-        self._fable_delay = 180
-        self._fable_steps = _parse_recovery_steps(DEFAULT_FABLE_STEPS)
-        self._fable_windows: set[str] = set()
-        # Windows whose model the user took over by hand. Persisted
-        # separately from the scope list so it works in all-windows mode
-        # too, where there is no tick to remove.
-        self._fable_optout: set[str] = set()
-        self._fable_all_windows = True   # eligible on every watched window
-        # title_key -> command the <resume> step types after the switch back
-        # (missing key => plain 'continue').
-        self._fable_resume: dict[str, str] = {}
-        # title_key -> how many recoveries per block episode may type that
-        # command (missing key => 1). Past the budget the final run PARKS:
-        # fallback finishes, /compact, switch back — but nothing typed.
-        self._fable_resume_loops: dict[str, int] = {}
         # title_key -> prompt typed when a watched session finishes a turn
         # and sits idle (the main table's "After finish" column). Empty =
         # feature off for that window.
@@ -1001,7 +529,7 @@ class Watcher(QObject):
         # default. Written on the worker thread via set_trigger_patterns.
         self._patterns: dict = {}
 
-        # Earliest pending fast-retick, so N recovering windows still
+        # Earliest pending fast-retick, so N windows asking for one still
         # produce ONE timer instead of N (which compounded geometrically).
         self._retick_at: Optional[datetime] = None
 
@@ -1092,16 +620,8 @@ class Watcher(QObject):
     @pyqtSlot(dict)
     def set_after_finish_loops(self, overrides: dict) -> None:
         # title_key -> runs REMAINING for that window's after-finish prompt
-        # (missing = 1, 0 = spent, negative = unlimited). Defensively coerced
-        # like every other persisted map — this runs on the worker thread.
-        loops: dict[str, int] = {}
-        if isinstance(overrides, dict):
-            for k, v in overrides.items():
-                try:
-                    n = int(v)
-                except (TypeError, ValueError):
-                    continue
-                loops[str(k)] = max(-1, n)
+        # (missing = 1, 0 = spent, negative = unlimited).
+        loops = coerce_after_finish_loops(overrides)
         changed = {k for k in loops
                    if loops.get(k) != self._after_finish_loops.get(k)}
         changed |= {k for k in self._after_finish_loops if k not in loops}
@@ -1109,91 +629,6 @@ class Watcher(QObject):
         for st in self._states.values():
             if title_key(st.title) in changed:
                 st.af_spent_logged = False
-
-    @pyqtSlot(dict)
-    def set_fable_config(self, cfg: dict) -> None:
-        # Every field is defensively coerced: this dict round-trips through
-        # QSettings as JSON, so a hand-edited or truncated store can deliver
-        # any type. A bad value must fall back to the default, never raise —
-        # this runs on the worker thread and an exception here would take the
-        # whole watch loop down.
-        was_on = self._fable_enabled
-        self._fable_enabled = bool(cfg.get("enabled", False))
-        self._fable_quota_switch = bool(cfg.get("quota_switch", False))
-        try:
-            self._fable_delay = max(1, int(cfg.get("delay", 180)))
-        except (TypeError, ValueError):
-            self._fable_delay = 180
-        steps_src = cfg.get("steps")
-        if not isinstance(steps_src, str) or not steps_src.strip():
-            steps_src = DEFAULT_FABLE_STEPS
-        self._fable_steps = _parse_recovery_steps(steps_src)
-        self._fable_all_windows = bool(cfg.get("all_windows", True))
-        wins = cfg.get("windows")
-        if not isinstance(wins, (list, tuple, set)):
-            wins = []
-        new_scope = {
-            title_key(str(t)) for t in wins if title_key(str(t))
-        }
-        outs = cfg.get("optout")
-        if not isinstance(outs, (list, tuple, set)):
-            outs = []
-        new_out = {title_key(str(t)) for t in outs if title_key(str(t))}
-        # Per-window resume commands for the <resume> step. Keyed by
-        # title_key like every other per-window setting; anything that isn't
-        # a str->str dict collapses to empty (=> plain 'continue').
-        res = cfg.get("resume")
-        self._fable_resume = (
-            {title_key(str(k)): str(v).strip()
-             for k, v in res.items() if title_key(str(k)) and str(v).strip()}
-            if isinstance(res, dict) else {})
-        # Per-window resume budget. Same defensive coercion; anything that
-        # doesn't int() or is < 1 falls back to the default of 1.
-        loops = cfg.get("resume_loops")
-        self._fable_resume_loops = {}
-        if isinstance(loops, dict):
-            for k, v in loops.items():
-                kk = title_key(str(k))
-                try:
-                    n = int(v)
-                except (TypeError, ValueError):
-                    continue
-                if kk and n >= 1:
-                    self._fable_resume_loops[kk] = n
-        # Widening the scope is the user asking for enforcement again. That
-        # includes ticking a window AND flipping on "all windows" — the old
-        # set-difference missed the latter, leaving a window permanently
-        # exempt with nothing in the UI to show it.
-        widened = bool(new_scope - self._fable_windows) or (
-            bool(cfg.get("all_windows", True)) and not self._fable_all_windows)
-        for st in self._states.values():
-            key = st.fable_scope_key or title_key(st.title)
-            if st.fable_user_optout and (key not in new_out or widened):
-                st.fable_user_optout = False
-        self._fable_windows = new_scope
-        self._fable_optout = set() if widened else new_out
-        # On, but aimed at nothing: every window fails the scope test, so the
-        # feature can never act — yet every checkbox the user looks at says it
-        # is on. Found live on 2026-09-23 (enabled + quota switching, no
-        # window ticked, "all windows" off). Said whenever this configuration
-        # is applied, which is startup and each OK of the dialog — rare
-        # enough not to nag, often enough not to be missed.
-        if (self._fable_enabled and not self._fable_all_windows
-                and not self._fable_windows):
-            self.log.emit(
-                "warn",
-                "model recovery is ON but applies to no window — neither "
-                "'All windows' nor any single window is ticked, so it will "
-                "never act (Advanced… → Model recovery)")
-        # A live edit can shorten the step script while a recovery is mid-run
-        # (index would point past the end), and switching the feature OFF must
-        # not leave a half-finished run armed to resume — hours later, into a
-        # session that has long since moved on.
-        n = len(self._fable_steps)
-        turned_off = was_on and not self._fable_enabled
-        for st in self._states.values():
-            if turned_off or st.fable_step >= n:
-                _fable_reset(st)
 
     @pyqtSlot(bool, bool)
     def set_auto_answer(self, choosers: bool, permissions: bool) -> None:
@@ -1278,13 +713,7 @@ class Watcher(QObject):
         self._running = False
         if self._timer is not None:
             self._timer.stop()
-        # Disarm any in-flight Fable recovery. Without this a run parked on
-        # <wait> resumes mid-script whenever the user presses Start again —
-        # possibly hours later — and types /model + Enter into a session that
-        # has moved on. Stopping must mean stopping.
         self._retick_at = None
-        for st in self._states.values():
-            _fable_reset(st)
         self.running_changed.emit(False)
         self.log.emit("info", "watcher stopped")
 
@@ -1301,18 +730,16 @@ class Watcher(QObject):
         except Exception as e:
             self.log.emit("err", f"tick error: {type(e).__name__}: {e}")
 
-    def _retick_soon(self, ms: int = FABLE_RETICK_MS) -> None:
-        """Schedule a quick follow-up tick so a multi-step Fable recovery
-        (confirm dialog → continue, timed waits) progresses in seconds rather
-        than waiting a full poll interval. Runs on the worker thread's own
-        event loop.
+    def _retick_soon(self, ms: int = RETICK_MS) -> None:
+        """Schedule a quick follow-up tick, so a run of choosers is answered
+        in seconds rather than one per poll interval. Runs on the worker
+        thread's own event loop.
 
-        COALESCED on purpose. This is called once per in-recovery window per
-        tick, and each scheduled tick schedules more: with two windows
-        recovering, one tick queues two timers, each of which queues two —
-        2^k pending ticks, every one of them a full UIA scan that also
-        advances the step machine. Keeping a single earliest-deadline timer
-        makes the retick rate independent of how many windows are recovering.
+        COALESCED on purpose. It can be called for several windows in one
+        tick, and each scheduled tick may schedule more: one timer per call
+        would let one tick queue two, and two windows queue four. Keeping a
+        single earliest-deadline timer makes the retick rate independent of
+        how many windows asked for one.
         """
         try:
             now = datetime.now(pytz.UTC)
@@ -1333,25 +760,6 @@ class Watcher(QObject):
         except Exception:
             pass
 
-    def _modal_up(self, tail: str, st) -> bool:
-        """True if a modal a bare Enter can accept is showing.
-
-        The safeguard picker is only counted until this run has ACCEPTED it
-        once. Its text stays in the scrollback afterwards, and at the picker's
-        tail allowance that stale copy kept reading as "a modal is open" for
-        the rest of the run — which made <esc> skip (so a switch queued behind
-        a busy turn was never surfaced, the case <esc> exists for) and made the
-        next <confirm> fire a bare Enter into a running turn. Four live
-        recoveries hid this: the fallback model always finished in time, so a
-        real dialog was there to accept.
-        """
-        if parse_switch_model_prompt(
-                tail, self._patterns.get("switch_model")):
-            return True
-        if st.fable_picker_used:
-            return False
-        return parse_fable_picker(tail, self._patterns.get("fable_picker"))
-
     def _retick_fire(self) -> None:
         """Target of the coalescing timer. Only a tick that the retick timer
         itself triggered may clear the pending marker — clearing it at the top
@@ -1361,49 +769,13 @@ class Watcher(QObject):
         self._retick_at = None
         self._tick_safely()
 
-    def _enumerate_settled(self) -> list:
-        """The window list, taken again once if it dropped windows that exist.
-
-        UI Automation sometimes hands back a short or empty list for a moment
-        while every window is still open — several times a day on the
-        maintainer's machine by 2026-09-25, often all four at once. The state
-        survived (the ghost handling below keeps it), but the pass was lost:
-        nothing on those windows was read or acted on for a whole interval.
-        A second look a couple of seconds later is almost always complete, so
-        take it — but only when a window we know about is missing AND Windows
-        confirms it is still open; a window that was really closed is not a
-        hiccup and costs no wait.
-        """
-        windows = find_terminal_windows()
-        try:
-            got = {int(w.NativeWindowHandle or 0) for w in windows}
-        except Exception:
-            return windows
-        missing = [h for h in self._states
-                   if h not in got and _hwnd_alive(h)]
-        if not missing:
-            return windows
-        time.sleep(_ENUM_RETRY_WAIT_S)
-        again = find_terminal_windows()
-        try:
-            got2 = {int(w.NativeWindowHandle or 0) for w in again}
-        except Exception:
-            return windows
-        # Keep whichever look saw more of the windows we are waiting for.
-        if sum(h in got2 for h in missing) > 0 and len(got2) >= len(got):
-            return again
-        return windows
-
     def _tick(self) -> None:
-        self._tick_body()
-
-    def _tick_body(self) -> None:
         now = datetime.now(pytz.UTC)
         cooldown = timedelta(minutes=15)
         buffer = timedelta(seconds=self._buffer)
         retry_interval = timedelta(seconds=self._retry_interval)
 
-        windows = self._enumerate_settled()
+        windows = find_terminal_windows()
         seen: set[int] = set()
 
         for w in windows:
@@ -1415,9 +787,7 @@ class Watcher(QObject):
             self.api_drain()
             # Every window is processed inside its own guard. Without it a
             # throw here abandoned the whole loop, so every window after
-            # this one went unwatched for the pass — the Fable block below
-            # has said so in its own comment for a while; the rest of the
-            # body needs the same promise.
+            # this one went unwatched for the pass.
             _label = "<window>"
             try:
                 try:
@@ -1577,932 +947,6 @@ class Watcher(QObject):
                     self._read_derived(st, tail, now)
                 dr = "[dry-run] " if self._dry_run else ""
 
-                # Isolated: this is the only block driven by user-authored
-                # free text (the recovery step script). An exception escaping
-                # here would abort the WHOLE tick, so every window enumerated
-                # after this one would silently stop being watched — with the
-                # only symptom a single 'tick error' log line.
-                try:
-                    # 0.53. Fable refusal-recovery (opt-in windows). When Fable's
-                    # safeguards block a turn the session stalls ON Fable. Recovery
-                    # runs the editable step-script (self._fable_steps): type /model,
-                    # confirm the "Switch model?" dialog, ESC to surface it, timed
-                    # waits, continue. Targeting is per-window — every send goes to
-                    # THIS window `w`, so a window with no notice is never switched
-                    # even in all-windows mode. While a recovery runs (or the notice
-                    # lingers, handled) the block `continue`s, so the outer continue /
-                    # limit / retry logic never touches a Fable-stalled window.
-                    _key = title_key(title)
-                    st.fable_scope_key = _key
-                    # Remember the opt-out across restarts: the worker flag alone
-                    # died with the process, so the tool resumed steering a window
-                    # the user had taken over.
-                    if _key in self._fable_optout:
-                        st.fable_user_optout = True
-                    _fable_ok = (self._fable_all_windows
-                                 or _key in self._fable_windows)
-                    # An opted-out window is off limits to EVERYTHING here, not
-                    # just to drift correction. Gating only the drift branch left
-                    # a genuine safeguard block free to run a full recovery —
-                    # switching the model back and starting a turn — on a window
-                    # the tool had just promised to leave alone.
-                    if st.fable_user_optout:
-                        _fable_ok = False
-                    # Out of scope is a legitimate choice, but a silent one
-                    # was indistinguishable from a broken tool. Seen live on
-                    # 2026-09-23: recovery and quota switching both ON, the
-                    # window list empty and "all windows" off — so a Fable
-                    # quota banner sat on screen, was recognised, and nothing
-                    # happened with not one line to say why. Say it once per
-                    # episode. Opted-out windows stay quiet: the user took
-                    # them over on purpose and needs no reminder.
-                    if (self._fable_enabled and not _fable_ok
-                            and not st.fable_user_optout and tail):
-                        _why = None
-                        if self._fable_quota_switch and parse_model_quota(
-                                tail, self._patterns.get("model_quota")):
-                            _why = "is out of quota on its model"
-                        elif fable_refusal_distance(
-                                tail, self._patterns.get("fable")) is not None:
-                            _why = "is blocked by a safeguard notice"
-                        if _why and not st.scope_warned:
-                            st.scope_warned = True
-                            self.log.emit(
-                                "warn",
-                                f"{_wt} {_why}, but model recovery is not "
-                                f"set up for this window — not switching. "
-                                f"Advanced… → Model recovery: tick this "
-                                f"window, or 'All windows'")
-                        elif not _why:
-                            # Re-armed only on a pass that actually READ the
-                            # screen (tail is non-empty here), so a UIA miss
-                            # cannot make the same episode announce twice.
-                            st.scope_warned = False
-                    if self._fable_enabled and _fable_ok:
-                        # A finished run whose verdict has come due. Judged here,
-                        # a tick or more after the last step, so the screen has
-                        # had time to show whether the closing 'continue' was
-                        # accepted or refused. While the session is streaming the
-                        # verdict keeps waiting — the turn itself is the evidence
-                        # (a refusal ends it within seconds, real work keeps it
-                        # running) — but bounded: a turn still going ten minutes
-                        # later was clearly not stopped by the block.
-                        if (st.fable_step < 0
-                                and st.fable_verdict_at is not None
-                                and now - st.fable_verdict_at
-                                >= timedelta(seconds=FABLE_VERDICT_DELAY_S)
-                                and tail):
-                            _vwant = st.fable_verdict_want
-                            _running = session_running(tail)
-                            _overdue = (now - st.fable_verdict_at
-                                        >= timedelta(seconds=FABLE_VERDICT_MAX_S))
-                            if not _running or _overdue:
-                                ended_on = current_model(tail)
-                                end_dist = fable_refusal_distance(
-                                    tail, self._patterns.get("fable"))
-                                stalled = (
-                                    end_dist is not None
-                                    and st.fable_notice_dist is not None
-                                    and end_dist <= (st.fable_notice_dist
-                                                     + FABLE_FRESH_MARGIN))
-                                if (_vwant and ended_on
-                                        and _vwant.lower()
-                                        not in ended_on.lower()):
-                                    self.log.emit(
-                                        "warn",
-                                        f"Fable-recover finished on {ended_on!r} "
-                                        f"but the script asked for {_vwant!r} → "
-                                        f"{_wt}; the session was NOT "
-                                        f"switched back")
-                                elif stalled and not _running:
-                                    self.log.emit(
-                                        "warn",
-                                        f"Fable-recover ran on {_wt} but the "
-                                        f"safeguard notice is still standing — "
-                                        f"the block was NOT cleared"
-                                        + (f" (on {ended_on})"
-                                           if ended_on else ""))
-                                else:
-                                    self.log.emit(
-                                        "info",
-                                        f"Fable-recover done → {_wt}"
-                                        + (f" (on {ended_on})"
-                                           if ended_on else ""))
-                                st.fable_verdict_at = None
-                                st.fable_verdict_want = None
-                        # A drift correction runs its own short script; the
-                        # configured one is for recovering from a safeguard.
-                        steps = st.fable_restore or self._fable_steps
-                        if 0 <= st.fable_step < len(steps):
-                            # Abandon a run parked too long. A window can drop out
-                            # of this block entirely (title drift, with per-window
-                            # opt-in), freezing fable_step mid-script; when it
-                            # drifts back hours later the run would otherwise
-                            # resume and type /model + Enter into a session that
-                            # moved on long ago.
-                            if (st.fable_step_at is not None
-                                    and now - st.fable_step_at
-                                    >= timedelta(seconds=FABLE_STALE_RUN_S)):
-                                self.log.emit(
-                                    "warn",
-                                    f"Fable-recover on {_wt}: run went stale; "
-                                    f"abandoning rather than resuming mid-script")
-                                _fable_reset(st)
-                                st.fable_handled = True
-                                st.status = ST_FABLE
-                                continue
-                            kind, arg = steps[st.fable_step]
-                            if kind == "effort":
-                                # Restore the level this window is configured
-                                # for, on the way back to the target model.
-                                # Its partner is the plain "/effort max" the
-                                # script types on the FALLBACK: a rescue run
-                                # is worth the best thinking available, but
-                                # leaving max in place afterwards would be
-                                # this tool quietly changing a setting the
-                                # user chose. Nothing configured means nothing
-                                # to restore, so the step is skipped rather
-                                # than guessing a level.
-                                _eff = self._effort_overrides.get(_key, "")
-                                if not _eff:
-                                    st.fable_step += 1
-                                    st.fable_step_at = now
-                                    st.status = ST_FABLE
-                                    continue
-                                kind, arg = "send", f"/effort {_eff}"
-                            if kind == "resume":
-                                # By the time <resume> runs, /compact has already
-                                # replaced the history — the flagged context that
-                                # caused the block is gone, so the prompt starts
-                                # fresh work on a clean slate. The per-window
-                                # command is typed on every counted run
-                                # ('continue' when none is configured: it picks
-                                # the compacted summary back up). The parking run
-                                # exists because the prompt ITSELF kept getting
-                                # blocked — typing it once more would restart
-                                # that loop, so it types nothing and leaves the
-                                # window idle on the target. Resolved here and
-                                # then run through the ordinary send machinery,
-                                # so a command configured as '/model …' still
-                                # gets the already-there skip and the busy hold.
-                                if st.fable_park:
-                                    self.log.emit(
-                                        "info",
-                                        f"{dr}Fable-recover: parking {_wt} — "
-                                        f"not typing the resume prompt again; "
-                                        f"edit it by hand before re-running")
-                                    kind = "park"    # → unknown-step: advance
-                                else:
-                                    kind = "send"
-                                    _cmd = self._fable_resume.get(
-                                        title_key(title))
-                                    arg = _cmd or "continue"
-
-                            # <wait> does NOT own the window: it lets the OUTER
-                            # continue / limit logic keep the fallback model unstuck
-                            # (we don't duplicate that), and a network stall RESETS the
-                            # countdown so the wait is N seconds of real run time.
-                            if kind == "wait":
-                                secs = (arg if arg is not None
-                                        else self._fable_delay)
-                                if st.fable_wait_from is None:
-                                    st.fable_wait_from = st.fable_step_at or now
-                                stuck = bool(tail and (
-                                    parse_retry_exhausted(
-                                        tail, self._patterns.get("retry"))
-                                    or parse_econnreset_stuck(
-                                        tail, self._patterns.get("econnreset"))
-                                    or parse_server_error_stuck(
-                                        tail, self._patterns.get("server_error"))))
-                                # Bank only time the session was actually RUNNING.
-                                # Network stalls contribute nothing, so <wait> means
-                                # "N seconds of real work on the fallback model", not
-                                # N seconds of wall clock. Resetting a countdown was
-                                # not enough: the old 4x wall cap expired during any
-                                # outage longer than 12 minutes, and real ones here
-                                # have lasted 36 and 90.
-                                if st.fable_wait_last is not None and not stuck:
-                                    st.fable_wait_acc += max(
-                                        0.0,
-                                        (now - st.fable_wait_last).total_seconds())
-                                st.fable_wait_last = now
-                                # Keep the step's heartbeat fresh. FABLE_STALE_RUN_S
-                                # abandons a run whose step has not moved in a long
-                                # time, which is meant for a window that dropped out
-                                # of the block entirely — but a <wait> riding out a
-                                # long outage is alive and working as designed, and
-                                # would otherwise be killed at 15 minutes.
-                                st.fable_step_at = now
-                                capped = (now - st.fable_wait_from
-                                          >= timedelta(seconds=secs
-                                                       * FABLE_WAIT_MAX_MULT))
-                                if st.fable_wait_acc < secs and not capped:
-                                    pass                     # still owed run time
-                                else:
-                                    if capped and st.fable_wait_acc < secs:
-                                        self.log.emit(
-                                            "warn",
-                                            f"Fable-recover on {_wt}: only "
-                                            f"{int(st.fable_wait_acc)}s of {secs}s run "
-                                            f"time banked after "
-                                            f"{int((now - st.fable_wait_from).total_seconds())}s "
-                                            f"wall — moving on anyway")
-                                    st.fable_step += 1        # wait done → next step
-                                    st.fable_step_at = now
-                                    st.fable_dlg_seen = False
-                                    st.fable_wait_from = None
-                                    st.fable_wait_acc = 0.0
-                                    st.fable_wait_last = None
-                                    st.fable_tries = 0
-                                    st.status = ST_FABLE
-                                    self._retick_soon()
-                                    continue
-                                st.status = ST_FABLE
-                                self._retick_soon(15000)
-                                # Fall through → the outer network/limit handlers keep
-                                # the FALLBACK model unstuck during the wait (we don't
-                                # duplicate that logic). They may overwrite `status`;
-                                # that's cosmetic and `fable_step` still owns the run.
-
-                            elif kind == "idle":
-                                # Wait for the turn to actually END. Unlike
-                                # <wait>'s fixed seconds this has no target
-                                # duration: finishing the remaining work takes as
-                                # long as it takes. Quiet must be SUSTAINED (the
-                                # spinner flickers between tool calls), and a
-                                # network stall is not a finish — the outer
-                                # handlers nudge the session back to life, and
-                                # the /compact that typically follows this step
-                                # would be calling the API mid-outage anyway.
-                                if st.fable_idle_from is None:
-                                    st.fable_idle_from = st.fable_step_at or now
-                                stuck = bool(tail and (
-                                    parse_retry_exhausted(
-                                        tail, self._patterns.get("retry"))
-                                    or parse_econnreset_stuck(
-                                        tail, self._patterns.get("econnreset"))
-                                    or parse_server_error_stuck(
-                                        tail, self._patterns.get("server_error"))))
-                                if not tail or stuck or session_running(tail):
-                                    st.fable_idle_since = None
-                                elif st.fable_idle_since is None:
-                                    st.fable_idle_since = now
-                                # Keep the step's heartbeat fresh, same as <wait>:
-                                # FABLE_STALE_RUN_S is for runs that dropped out
-                                # of the block, not for a long fallback turn.
-                                st.fable_step_at = now
-                                settled = (
-                                    st.fable_idle_since is not None
-                                    and now - st.fable_idle_since
-                                    >= timedelta(seconds=FABLE_IDLE_SETTLE_S))
-                                walled = (now - st.fable_idle_from
-                                          >= timedelta(seconds=FABLE_IDLE_WALL_S))
-                                if settled or walled:
-                                    if walled and not settled:
-                                        self.log.emit(
-                                            "warn",
-                                            f"Fable-recover on {_wt}: still "
-                                            f"not idle after "
-                                            f"{int((now - st.fable_idle_from).total_seconds())}s"
-                                            f" wall — moving on anyway")
-                                    st.fable_step += 1       # idle → next step
-                                    st.fable_step_at = now
-                                    st.fable_dlg_seen = False
-                                    st.fable_idle_since = None
-                                    st.fable_idle_from = None
-                                    st.fable_tries = 0
-                                    st.status = ST_FABLE
-                                    self._retick_soon()
-                                    continue
-                                st.status = ST_FABLE
-                                self._retick_soon(15000)
-                                # Fall through, same as <wait>: the outer
-                                # handlers keep the fallback unstuck while it
-                                # finishes.
-
-                            else:
-                                # Anything in this branch types into the window;
-                                # stamping it is what lets a later model change be
-                                # attributed to us rather than to the user.
-                                st.fable_acted_at = now
-                                # send / enter / esc / confirm own the window (skip outer).
-                                # Every send is CHECKED: send_text_lines / send_keys
-                                # return False when they can't bring the window to the
-                                # foreground (the guard against typing into whatever
-                                # the user is using). Advancing on a failed send is how
-                                # you end up pressing ESC with no dialog open and then
-                                # 'continue'-ing on the model you meant to leave.
-                                advance = False
-                                failed = False
-                                if kind == "send":
-                                    # A `/model X` step when the bar already reads X
-                                    # is at best a no-op and at worst harmful: typed
-                                    # into a running turn it queues, and the switch
-                                    # dialog then surfaces minutes later with nobody
-                                    # left to confirm it. Skipping also makes the
-                                    # script work on both shapes of the safeguard
-                                    # message — when Claude Code offers a picker,
-                                    # <confirm> has already moved us off the target
-                                    # and the explicit switch is redundant.
-                                    _msk = _model_step_target(arg)
-                                    _bar = current_model(tail) if tail else None
-                                    # Never switch mid-turn. A /model typed into
-                                    # a running turn is only queued, and cutting
-                                    # the fallback's turn short is pointless
-                                    # anyway: until /compact has run, the flagged
-                                    # history rides along on every retry, so an
-                                    # early switch back only buys another
-                                    # refusal. Bounded — a turn that never ends
-                                    # cannot pin the run.
-                                    _busy = bool(_msk and tail
-                                                 and session_running(tail))
-                                    _waited = (
-                                        st.fable_step_at is not None
-                                        and now - st.fable_step_at
-                                        >= timedelta(seconds=FABLE_IDLE_MAX_S))
-                                    if _busy and not _waited:
-                                        # Say it once per step. A silent hold is
-                                        # indistinguishable in the log from a step
-                                        # that simply had not come due yet, which
-                                        # makes the guard impossible to confirm
-                                        # from a real recovery.
-                                        if not st.fable_hold_logged:
-                                            st.fable_hold_logged = True
-                                            self.log.emit(
-                                                "info",
-                                                f"{dr}Fable-recover: {_wt} — "
-                                                f"letting the current turn "
-                                                f"finish before {arg!r}")
-                                        st.status = ST_FABLE
-                                        self._retick_soon(15000)
-                                        continue
-                                    if _msk and _model_matches(_bar, _msk):
-                                        self.log.emit(
-                                            "info",
-                                            f"{dr}Fable-recover: already on "
-                                            f"{_bar!r}, skipping {arg!r} → {_wt}")
-                                        advance = True
-                                    elif tail and composer_has_draft(tail):
-                                        # Typed onto a draft, the line is
-                                        # submitted WITH it. Not bounded like
-                                        # the busy hold: proceeding later
-                                        # would do the same harm, only later.
-                                        # Only the draft is checked here, not
-                                        # open prompts: the recovery drives
-                                        # its own dialogs (<esc>/<confirm>,
-                                        # the spent-picker tracking), and its
-                                        # accepted picker lingers in the
-                                        # scrollback looking open.
-                                        if not st.fable_hold_logged:
-                                            st.fable_hold_logged = True
-                                            self.log.emit(
-                                                "info",
-                                                f"{dr}Fable-recover: {_wt} — "
-                                                f"holding {arg!r}: the input "
-                                                f"box holds unsent text")
-                                        st.status = ST_FABLE
-                                        self._retick_soon(15000)
-                                        continue
-                                    else:
-                                        self.log.emit(
-                                            "fire",
-                                            f"{dr}Fable-recover → {_wt}: {arg!r}")
-                                        if send_text_lines(w, [arg],
-                                                           dry_run=self._dry_run):
-                                            advance = True
-                                        else:
-                                            failed = True
-                                elif kind == "enter":
-                                    if send_text_lines(w, [""], dry_run=self._dry_run):
-                                        advance = True
-                                    else:
-                                        failed = True
-                                elif kind == "esc":
-                                    # ESC makes the session idle so the NEXT step
-                                    # lands as a command instead of being queued
-                                    # (a queued /model never takes effect —
-                                    # measured live: a whole recovery ran its
-                                    # wait believing it was on the fallback while
-                                    # the switch still sat in the queue). The
-                                    # default script no longer interrupts a turn;
-                                    # this step exists for custom scripts that
-                                    # explicitly ask for it.
-                                    _busy = bool(tail and session_running(tail))
-                                    if tail and self._modal_up(tail, st):
-                                        # Dialog already up — ESC would CANCEL it. Skip;
-                                        # the next <confirm> accepts the showing dialog.
-                                        advance = True
-                                    elif not _busy:
-                                        advance = True   # nothing to interrupt
-                                    else:
-                                        self.log.emit(
-                                            "fire",
-                                            f"{dr}Fable-recover → {_wt}: ESC "
-                                            f"(interrupt so the switch lands)")
-                                        if send_keys(w, "{Esc}", dry_run=self._dry_run):
-                                            advance = True
-                                        else:
-                                            failed = True
-                                elif kind == "confirm":
-                                    # Either confirmable modal counts: the
-                                    # safeguard picker (Enter = "Switch to
-                                    # <fallback>", which IS the whole recovery) or
-                                    # the /model "Switch model?" Yes/No dialog.
-                                    dlg_up = bool(tail and self._modal_up(tail, st))
-                                    # A SHOWING modal is confirmed no matter how
-                                    # long this step has waited — the timeouts
-                                    # below only decide when to give up on a modal
-                                    # that never appeared. Checking overdue first
-                                    # was a live failure: at a 60s poll with a
-                                    # fixed 30s deadline, the first tick to reach
-                                    # this step was already overdue, so it advanced
-                                    # without ever looking at the open picker. The
-                                    # modal just sat there and the recovery
-                                    # silently did nothing.
-                                    # The deadline is also poll-relative now, so a
-                                    # slow poll can't expire it before a tick lands.
-                                    confirm_max = max(FABLE_CONFIRM_MAX_S,
-                                                      2 * self._interval)
-                                    overdue = (
-                                        st.fable_step_at is not None
-                                        and now - st.fable_step_at
-                                        >= timedelta(seconds=confirm_max))
-                                    if st.fable_dlg_seen:
-                                        # EXACTLY ONE Enter per dialog, ever. The
-                                        # confirmed modal's text STAYS in the
-                                        # scrollback, so "the pattern still
-                                        # matches" is not evidence the modal is
-                                        # still open — measured live, re-pressing
-                                        # on that signal fired 8 Enters for one
-                                        # dialog, and every extra Enter submits
-                                        # whatever sits in the user's input box as
-                                        # a prompt. Settle briefly, then move on.
-                                        if (st.fable_last_key_at is not None
-                                                and now - st.fable_last_key_at
-                                                >= timedelta(
-                                                    seconds=FABLE_KEY_GAP_S)):
-                                            advance = True
-                                    elif dlg_up:
-                                        self.log.emit(
-                                            "fire",
-                                            f"{dr}Fable-recover: confirming Switch-model "
-                                            f"(Yes) → {_wt}")
-                                        if send_text_lines(w, [""],
-                                                           dry_run=self._dry_run):
-                                            st.fable_dlg_seen = True
-                                            st.fable_last_key_at = now
-                                            # If this Enter went to the picker (no
-                                            # switch dialog present), it is spent:
-                                            # its text lingers and must not read
-                                            # as an open modal again this run.
-                                            if not parse_switch_model_prompt(
-                                                    tail,
-                                                    self._patterns.get(
-                                                        "switch_model")):
-                                                st.fable_picker_used = True
-                                        else:
-                                            failed = True
-                                    elif (overdue
-                                          or (st.fable_step_at is not None
-                                              and now - st.fable_step_at
-                                              >= timedelta(
-                                                  seconds=SWITCH_SETTLE_S))):
-                                        advance = True      # no dialog appeared
-                                else:
-                                    advance = True          # unknown step → skip
-
-                                if failed:
-                                    # Retry the same step next tick, bounded so a
-                                    # window we can never focus doesn't spin forever.
-                                    st.fable_tries += 1
-                                    if st.fable_tries >= FABLE_SEND_RETRIES:
-                                        self.log.emit(
-                                            "warn",
-                                            f"Fable-recover on {_wt}: could not "
-                                            f"send (window wouldn't come forward); "
-                                            f"abandoning this recovery")
-                                        _fable_reset(st)
-                                        st.fable_handled = True
-                                elif advance:
-                                    st.fable_step += 1
-                                    st.fable_step_at = now
-                                    st.fable_dlg_seen = False
-                                    st.fable_hold_logged = False
-                                    st.fable_tries = 0
-                                    st.fable_wait_from = None
-                                    st.fable_last_key_at = None
-                                    if st.fable_step >= len(steps):
-                                        # The verdict is NOT judged here. The
-                                        # closing 'continue' takes a few seconds
-                                        # to be accepted or refused, and judging
-                                        # 2 seconds in reported "done" for runs
-                                        # whose refusal had simply not printed
-                                        # yet. Latch what this run aimed for and
-                                        # judge on a later tick, once the screen
-                                        # has caught up with reality.
-                                        wanted = _last_model_step(steps)
-                                        # A cycle counts against Tries only by
-                                        # reaching the end. One killed on the way
-                                        # (a window that never came forward, a
-                                        # run gone stale) never attempted the
-                                        # thing the allowance is for, and with
-                                        # the default of 1 that used to spend the
-                                        # entire budget without a single try.
-                                        # Both flags are read before the reset,
-                                        # which clears the per-run one.
-                                        if st.fable_park:
-                                            st.fable_parked = True
-                                        else:
-                                            st.fable_tried += 1
-                                        _fable_reset(st)
-                                        st.fable_handled = True
-                                        st.fable_verdict_at = now
-                                        st.fable_verdict_want = wanted
-                                st.status = ST_FABLE
-                                self._retick_soon()
-                                continue
-
-                        # Detection runs ONLY when no recovery is in flight. During a
-                        # <wait> the block falls through to here, and the safeguard
-                        # notice is still on screen (the fallback model has barely
-                        # printed anything yet) — re-entering would restart the script
-                        # from step 0, ESC-interrupting the very turn it just started,
-                        # every few seconds, forever.
-                        if st.fable_step < 0:
-                            dist = (fable_refusal_distance(
-                                tail, self._patterns.get("fable"))
-                                if tail else None)
-                            fable_hit = dist is not None
-
-                            # --- per-model quota -------------------------
-                            # A different failure from a safeguard block, so
-                            # a different answer: nothing is wrong with the
-                            # conversation, one model simply has nothing left.
-                            # No /compact — throwing away the history would
-                            # cost real work and buy nothing, since the quota
-                            # is not what the history says.
-                            _quota_now = (
-                                self._fable_quota_switch and tail
-                                and parse_model_quota(
-                                    tail, self._patterns.get("model_quota")))
-                            # Releasing on "no banner seen" alone treats a
-                            # failed read as evidence: read_terminal_text()
-                            # returns None on a UIA miss and the tick turns
-                            # that into an empty tail, which every detector
-                            # then reports as "nothing on screen". The hold is
-                            # dropped and the log announces the allowance came
-                            # back, having looked at nothing. Unticking the
-                            # switch is the user's own instruction and needs no
-                            # screen; the banner clearing has to be SEEN.
-                            if st.quota_hold and (
-                                    not self._fable_quota_switch
-                                    or (tail and not _quota_now)):
-                                # Either the allowance came back or the user
-                                # unticked the switch. Both release the latch —
-                                # it exists only to stop drift undoing OUR
-                                # detour — but they are different events and
-                                # saying the wrong one sends the reader looking
-                                # at the wrong thing.
-                                st.quota_hold = False
-                                st.quota_at = None
-                                self.log.emit(
-                                    "info",
-                                    (f"quota switching turned off; {_wt} "
-                                     f"is back under normal model handling")
-                                    if not self._fable_quota_switch else
-                                    (f"quota banner cleared on {_wt}; "
-                                     f"normal model handling resumes"))
-                            elif (_quota_now and not st.quota_hold
-                                    and not fable_hit):
-                                _fallback = _fable_fallback_model(steps)
-                                _cur = current_model(tail)
-                                if not _fallback:
-                                    self.log.emit(
-                                        "warn",
-                                        f"quota banner on {_wt} but the "
-                                        f"script names no fallback model; "
-                                        f"leaving it alone")
-                                elif _cur and _cur.lower().startswith(
-                                        _fallback.lower()):
-                                    # Already on the fallback — no keystroke
-                                    # needed, but the hold still goes on. Drift
-                                    # correction would otherwise read "on the
-                                    # wrong model" and steer it straight back
-                                    # into the model that has nothing left,
-                                    # which is the whole thing this prevents.
-                                    st.quota_hold = True
-                                    st.quota_at = now
-                                    self.log.emit(
-                                        "info",
-                                        f"{_wt} is out of quota and "
-                                        f"already on {_fallback!r}; holding "
-                                        f"it there until the quota resets")
-                                else:
-                                    st.quota_hold = True
-                                    st.quota_at = now
-                                    st.fable_step = 0
-                                    st.fable_step_at = now
-                                    st.fable_acted_at = now
-                                    st.status = ST_FABLE
-                                    st.fable_our_models.add(_fallback)
-                                    # Switch and pick the work back up. No
-                                    # <idle>/<compact>/<resume>: this is not a
-                                    # recovery cycle, it is a detour that lasts
-                                    # until the allowance returns.
-                                    st.fable_restore = [
-                                        ("confirm", None),
-                                        ("send", f"/model {_fallback}"),
-                                        ("confirm", None),
-                                        # Same bargain as the safeguard
-                                        # recovery: the detour is worth the
-                                        # best thinking available, and the
-                                        # window's own level is restored by
-                                        # the <effort> step when it goes home.
-                                        ("send", "/effort max"),
-                                        ("send", "continue"),
-                                    ]
-                                    self.log.emit(
-                                        "warn",
-                                        f"{_wt} is out of quota on "
-                                        f"{_cur or 'its model'}; finishing on "
-                                        f"{_fallback!r} until it resets")
-                            if fable_hit:
-                                st.fable_clear_since = None   # streak of quiet ends
-                            if fable_hit and st.fable_handled:
-                                # The handled notice stays in scrollback for a long
-                                # time (measured: tens of minutes), so "a notice is
-                                # visible" can't distinguish a NEW block. Track the
-                                # FURTHEST the handled notice has drifted: it only
-                                # moves away as the session prints, so a match that
-                                # is suddenly much closer to the tail is a fresh
-                                # notice. Without this the recovery's own final
-                                # 'continue' re-running the flagged message — the
-                                # likeliest next event — would re-block unnoticed.
-                                # NB: not named `seen` — that is the tick's set of
-                                # live hwnds, and shadowing it corrupts the
-                                # closed-window pruning at the end of the tick.
-                                furthest = st.fable_notice_dist
-                                # Exact first: every block carries its own request
-                                # id. The positional test below cannot see a block
-                                # that replaced its predecessor at the same screen
-                                # position, which is what a redrawn TUI produces —
-                                # live, a block 2s after a recovery went unnoticed
-                                # for the rest of the session. A missing id means
-                                # "no new information", never "new block".
-                                _nid = fable_refusal_id(
-                                    tail, self._patterns.get("fable"))
-                                _known = st.fable_notice_id
-                                if _nid and _known and _nid != _known:
-                                    self.log.emit(
-                                        "warn",
-                                        f"new Fable safeguard on {_wt} "
-                                        f"({_nid}) while the previous notice was "
-                                        f"still on screen")
-                                    st.fable_handled = False
-                                    st.fable_notice_id = _nid
-                                    st.fable_notice_dist = dist
-                                elif (furthest is not None
-                                        and dist + FABLE_FRESH_MARGIN < furthest):
-                                    self.log.emit(
-                                        "warn",
-                                        f"new Fable safeguard on {_wt} while "
-                                        f"the previous notice was still on screen")
-                                    st.fable_handled = False
-                                else:
-                                    st.fable_notice_dist = (
-                                        dist if furthest is None
-                                        else max(furthest, dist))
-                            if not fable_hit:
-                                # Re-arm immediately so a fresh block is picked up
-                                # at once, but do NOT declare the episode over yet:
-                                # the notice routinely vanishes for a tick between
-                                # one block and the next.
-                                st.fable_handled = False
-                                if st.fable_clear_since is None:
-                                    st.fable_clear_since = now
-                                elif (now - st.fable_clear_since
-                                      >= timedelta(seconds=FABLE_CLEARED_S)):
-                                    st.fable_runs = 0
-                                    st.fable_tried = 0
-                                    st.fable_parked = False
-                                    st.fable_notice_dist = None
-                                    st.fable_notice_id = None
-                            elif not st.fable_handled and steps:
-                                # Each recovery ends with <resume> typing the
-                                # window's prompt onto a freshly compacted
-                                # context — so a block landing HERE means the
-                                # prompt itself trips the filter, and each window
-                                # gets a budget ("Tries" in Advanced, default 1)
-                                # of recoveries that may type it. One past the
-                                # budget, the PARKING run: finish on the
-                                # fallback, /compact, switch back — but type
-                                # nothing, because retyping a blocked prompt is
-                                # the infinite loop this cap exists to prevent.
-                                # Counted on the cycles that actually TYPED the
-                                # prompt, not on the ones that merely started: a
-                                # cycle can die for reasons that have nothing to
-                                # do with the block (the window never reaches the
-                                # foreground, the run goes stale), and with the
-                                # default allowance of 1 that consumed the whole
-                                # budget without ever making an attempt.
-                                _loops = self._fable_resume_loops.get(_key, 1)
-                                if st.fable_parked:
-                                    # The parking run already happened and the
-                                    # window got blocked AGAIN — something else
-                                    # (the user, an after-finish prompt) started
-                                    # this turn. Nothing left to do by machine.
-                                    self.log.emit(
-                                        "warn",
-                                        f"Fable safeguard on {_wt} again "
-                                        f"after parking — leaving it alone; the "
-                                        f"prompt needs a human edit")
-                                    st.fable_handled = True
-                                elif st.fable_tried >= _loops:
-                                    st.fable_runs += 1
-                                    self.log.emit(
-                                        "warn",
-                                        f"{dr}Fable safeguard on {_wt}: the "
-                                        f"resume prompt was blocked {_loops}x — "
-                                        f"final run lets the fallback finish "
-                                        f"and /compact, then parks on the "
-                                        f"target with nothing typed; edit the "
-                                        f"prompt by hand")
-                                    _fable_reset(st)
-                                    st.fable_park = True
-                                    st.fable_step = 0
-                                    st.fable_step_at = now
-                                    st.fable_notice_dist = dist
-                                    st.fable_notice_id = fable_refusal_id(
-                                        tail, self._patterns.get("fable"))
-                                    st.status = ST_FABLE
-                                    self._retick_soon()
-                                    continue
-                                else:
-                                    st.fable_runs += 1
-                                    self.log.emit(
-                                        "fire",
-                                        f"{dr}Fable safeguard on {_wt}; running "
-                                        f"recovery ({len(steps)} steps)")
-                                    _fable_reset(st)
-                                    st.fable_step = 0
-                                    st.fable_step_at = now
-                                    st.fable_notice_dist = dist
-                                    # Latch which block this run is for, so the
-                                    # next one is recognised even if it renders in
-                                    # exactly the same place.
-                                    st.fable_notice_id = fable_refusal_id(
-                                        tail, self._patterns.get("fable"))
-                                    st.status = ST_FABLE
-                                    self._retick_soon()
-                                    continue
-                            # Notice lingers but already handled: show it in the table,
-                            # then FALL THROUGH. Owning the window here used to skip the
-                            # limit / retry / oauth handlers below, so a session that
-                            # ended on a lingering notice went permanently unwatched —
-                            # the exact overnight stall this tool exists to prevent.
-                            if st.fable_handled:
-                                st.status = ST_FABLE
-
-                            # Steer back to the model the script targets. Being
-                            # parked on the fallback is a FAILURE, not a resting
-                            # state — the point of enabling this is to keep
-                            # working on the chosen model. Only runs when idle
-                            # (no recovery in flight) and with no notice on
-                            # screen, so it never races the recovery itself.
-                            want = _last_model_step(steps)
-                            cur = current_model(tail) if tail else None
-                            # `cur` is None whenever the bar can't be read
-                            # (UIA miss, mid-redraw, a modal covering it). That is
-                            # UNKNOWN, not on-target: treating it as on-target
-                            # reset the drift counters and made FABLE_DRIFT_MAX
-                            # unreachable, so a window that can never reach the
-                            # target got /model typed into it all night.
-                            known = bool(want) and bool(cur)
-                            on_target = (not want or (bool(cur)
-                                         and want.lower() in cur.lower()))
-                            # A model change we did NOT cause is the user taking
-                            # manual control. Steering that back would make the
-                            # feature fight its owner, so treat it as an
-                            # instruction: untick the window and stop enforcing.
-                            # Only a TRANSITION counts — a window that has been
-                            # sitting off-target since a failed run never changed
-                            # under us, and still deserves repair.
-                            quiet = (
-                                st.fable_acted_at is None
-                                or now - st.fable_acted_at
-                                >= timedelta(seconds=FABLE_USER_SWITCH_QUIET_S))
-                            ours = any(m and m.lower() in (cur or "").lower()
-                                       for m in st.fable_our_models)
-                            # ...unless an empty quota explains it. Switching
-                            # away from a model that has nothing left is not
-                            # "stop managing this window", it is the only sane
-                            # move — and the quota branch above has already
-                            # latched quota_hold for it this very pass. Taking
-                            # it as an opt-out removed the window from scope for
-                            # good; that is how the live scope was emptied on
-                            # 2026-08-14, the night the first quota banner was
-                            # captured, leaving the feature dead for a month.
-                            if (cur and st.fable_last_model
-                                    and cur != st.fable_last_model
-                                    and not on_target and quiet
-                                    and not fable_hit and not ours
-                                    and not st.quota_hold
-                                    and not st.fable_user_optout):
-                                st.fable_user_optout = True
-                                self.log.emit(
-                                    "warn",
-                                    f"{_wt} was switched by hand from "
-                                    f"{st.fable_last_model!r} to {cur!r}; taking "
-                                    f"that as your call — unticking it and no "
-                                    f"longer steering it back")
-                                self.fable_untick.emit(title_key(title))
-                            # Only record the model when the verdict was
-                            # actually evaluable. Advancing it while suppressed
-                            # (a notice on screen) consumed the transition, so a
-                            # hand switch made during the tens of minutes a handled
-                            # notice lingers was masked forever — and drift then
-                            # steered it back.
-                            if cur and (not fable_hit) and quiet:
-                                st.fable_last_model = cur
-                            elif cur and st.fable_last_model is None:
-                                st.fable_last_model = cur
-
-                            if on_target and known:
-                                st.fable_drift_runs = 0
-                                st.fable_drift_at = None
-                            elif not known:
-                                pass                 # can't tell; change nothing
-                            elif st.fable_user_optout:
-                                pass                 # the user is driving this one
-                            elif st.quota_hold:
-                                # WE moved this window off the target model
-                                # because the target had nothing left. Steering
-                                # it back would put the session straight into
-                                # the model that cannot answer, undo the switch
-                                # that is currently doing the work, and do it
-                                # again every grace period until the cap ran
-                                # out. The window stays put until the quota
-                                # banner clears (below), which is the only
-                                # evidence the allowance actually returned.
-                                pass
-                            elif self._fable_all_windows:
-                                # Drift enforcement needs an explicit per-window
-                                # opt-in. In all-windows mode it would switch every
-                                # watched session onto the target — including ones
-                                # the user deliberately put on another model and
-                                # that never saw a safeguard block. Both the README
-                                # and the checkbox tooltip promise only the window
-                                # showing a notice is ever touched.
-                                pass
-                            elif not fable_hit and not st.fable_handled:
-                                settled = (
-                                    st.fable_step_at is None
-                                    or now - st.fable_step_at
-                                    >= timedelta(seconds=FABLE_DRIFT_GRACE_S))
-                                spaced = (
-                                    st.fable_drift_at is None
-                                    or now - st.fable_drift_at
-                                    >= timedelta(seconds=FABLE_DRIFT_RETRY_S))
-                                # A streak that has gone quiet is over. Decay it
-                                # before deciding anything, so both the patient
-                                # mode and the give-up cap measure one episode
-                                # rather than a lifetime total.
-                                if (st.fable_drift_at is not None
-                                        and now - st.fable_drift_at
-                                        >= timedelta(
-                                            seconds=FABLE_BOUNCE_WINDOW_S)):
-                                    st.fable_drift_runs = 0
-                                if (settled and spaced
-                                        and st.fable_drift_runs < FABLE_DRIFT_MAX):
-                                    st.fable_drift_runs += 1
-                                    self.log.emit(
-                                        "warn",
-                                        f"{dr}{_wt} is on {cur!r} but should be "
-                                        f"on {want!r}; steering it back "
-                                        f"({st.fable_drift_runs}/"
-                                        f"{FABLE_DRIFT_MAX})")
-                                    _fable_reset(st)   # clears fable_restore
-                                    st.fable_drift_at = now
-                                    st.fable_acted_at = now
-                                    st.fable_step = 0
-                                    st.fable_step_at = now
-                                    st.status = ST_FABLE
-                                    # Restore-only script: switch and accept the
-                                    # dialog. No 'continue' — the session's own
-                                    # work is not ours to resume here.
-                                    st.fable_restore = [("send", f"/model {want}"),
-                                                        ("confirm", None)]
-                                    self._retick_soon()
-                                    continue
-
-                except Exception as e:
-                    self.log.emit(
-                        'err',
-                        f'Fable-recover error on {_wt}: '
-                        f'{type(e).__name__}: {e}; disabling it for this window')
-                    _fable_reset(st)
-                    st.fable_handled = True
-
                 # 0.52. Dead-session states 'continue' can't fix: warn once.
                 if tail and parse_oauth_expired(
                         tail, self._patterns.get("oauth")):
@@ -2517,12 +961,8 @@ class Watcher(QObject):
                     st.oauth_logged = False
 
                 # 0.55. Interactive limit picker ("What do you want to do?").
-                # Newer Claude Code builds show this modal INSTEAD of the limit
-                # banner; option 1 ("Stop and wait for limit to reset") is
-                # pre-selected, so a bare Enter confirms it and makes the
-                # regular banner (with the reset time) appear — which the flow
-                # below then picks up on the next tick. Does NOT touch
-                # last_sent_utc: the banner must not be swallowed by cooldown.
+                # Newer Claude Code builds show this modal under the limit
+                # banner. It is marked and left for the user.
                 if tail and parse_limit_prompt(
                         tail, self._patterns.get("limit_prompt"),
                         self._patterns.get("limit")):
@@ -2551,9 +991,8 @@ class Watcher(QObject):
                         )
                     st.status = ST_PROMPT
                     continue
-                elif st.prompt_active or st.prompt_last_sent_utc is not None:
+                elif st.prompt_active:
                     st.prompt_active = False
-                    st.prompt_last_sent_utc = None
                     if st.status == ST_PROMPT:
                         st.status = ST_IDLE
 
@@ -2580,12 +1019,9 @@ class Watcher(QObject):
                         tail, self._patterns.get("chooser"),
                         self._patterns.get("permission"))
                     # The two dialogs that change which model the session
-                    # runs on are NOT ordinary choosers. Confirming them is
-                    # the recovery's job, at the step in its script that
-                    # expects them; answering out of band would put a second
-                    # Enter on a dialog that has already been answered, and
-                    # would switch models on windows that never opted into
-                    # having their model touched at all.
+                    # runs on are NOT ordinary choosers: Enter on either one
+                    # switches the model, and that is the user's decision.
+                    # They are left for a human, whatever the switches say.
                     _model_dlg = bool(
                         parse_fable_picker(
                             tail, self._patterns.get("fable_picker"))
@@ -2928,13 +1364,6 @@ class Watcher(QObject):
                         )
                         ok = send_text_lines(w, lines, dry_run=self._dry_run)
                         if ok:
-                            # The fire path types /model <override> too. Leaving it
-                            # unstamped made the tool read its own switch as a hand
-                            # switch on the next tick — and delete the user's
-                            # recovery opt-in from the saved settings.
-                            if model:
-                                st.fable_acted_at = now
-                                st.fable_our_models.add(str(model).strip())
                             st.last_sent_utc = now
                             st.fired_key = st.reset_key
                             st.reset_utc = None
@@ -2977,8 +1406,8 @@ class Watcher(QObject):
                 #     (a fresh shell at a prompt is not a finished run)
                 #   * post-fire cooldown       -> the fire's own follow-up
                 #   * safeguard notice in view -> blocked, not finished; the
-                #     recovery (or the user) owns that
-                #   * recovery in flight       -> fable_step >= 0
+                #     same prompt would only be refused again, so the user
+                #     owns that
                 af_cmd = self._after_finish.get(title_key(title))
                 if af_cmd and tail:
                     _af_key = title_key(title)
@@ -3005,7 +1434,6 @@ class Watcher(QObject):
                         st.af_idle_since = None
                     elif (st.af_seen_running
                             and not in_cooldown
-                            and st.fable_step < 0
                             and fable_refusal_distance(
                                 tail, self._patterns.get("fable")) is None):
                         if st.af_idle_since is None:
@@ -3067,9 +1495,8 @@ class Watcher(QObject):
         # one when the root enumeration does — both promised in its docstring.
         # Pruning on that alone let one COM hiccup delete every window's
         # state, and the expensive half of that cannot be re-read from the
-        # screen: the step an in-flight recovery had reached, the quota hold
-        # that stops drift steering a window back onto an exhausted model, and
-        # the send cooldown. So ask the OS which handles are really gone.
+        # screen: a pending limit's reset time, the answered chooser, and the
+        # send cooldown. So ask the OS which handles are really gone.
         ghosts = set()
         for hwnd in list(self._states):
             if hwnd in seen:
@@ -3088,8 +1515,9 @@ class Watcher(QObject):
                 self.log.emit(
                     "warn",
                     f"{len(ghosts)} open window(s) missing from this pass "
-                    f"({_ids}; UIA enumeration hiccup) — keeping what is "
-                    f"known about them rather than starting them over")
+                    f"({_ids}; not readable as a Claude session right now) "
+                    f"— keeping what is known about them rather than "
+                    f"starting them over")
             self._ghost_hwnds = set(ghosts)
         # A ghost's queued row command is kept for the same reason its state
         # is: the window is still there to receive it.
@@ -3432,9 +1860,9 @@ class Watcher(QObject):
             out.append(self._snapshot_row(st))
         # Stable ordering: retry (network down) / limit picker are the most
         # urgent, then rate-limit pending, then idle, then excluded.
-        order = {ST_RETRY: 0, ST_PROMPT: 1, ST_FABLE: 2, ST_FIRING: 3,
-                 ST_PENDING: 4, ST_SENT: 5, ST_IDLE: 6, ST_COOLDOWN: 7,
-                 ST_EXCLUDED: 8}
+        order = {ST_RETRY: 0, ST_PROMPT: 1, ST_FIRING: 2,
+                 ST_PENDING: 3, ST_SENT: 4, ST_IDLE: 5, ST_COOLDOWN: 6,
+                 ST_EXCLUDED: 7}
         out.sort(key=lambda r: (order.get(r["status"], 9), r["title"].lower()))
         return out
 
@@ -3452,7 +1880,6 @@ STATUS_LABEL = {
     ST_EXCLUDED: "Excluded",
     ST_RETRY:    "⚠ Net retry",
     ST_PROMPT:   "⏎ Limit prompt",
-    ST_FABLE:    "⇄ Fable-recover",
     "held":      "Input held",
     "unknown":   "Unreadable",
     "attention": "Needs attention",
@@ -3494,7 +1921,6 @@ def _make_palette(scheme: "Qt.ColorScheme") -> dict:
                 ST_EXCLUDED: QColor("#2a2d31"),
                 ST_RETRY:    QColor("#5c1e1e"),
                 ST_PROMPT:   QColor("#3d3160"),
-                ST_FABLE:    QColor("#0b4a4a"),
             },
             "status_fg": QColor("#f1f3f5"),
             "log_fg": {
@@ -3516,7 +1942,6 @@ def _make_palette(scheme: "Qt.ColorScheme") -> dict:
             ST_EXCLUDED: QColor("#f8f9fa"),
             ST_RETRY:    QColor("#ffc9c9"),
             ST_PROMPT:   QColor("#e5dbff"),
-            ST_FABLE:    QColor("#c3fae8"),
         },
         "status_fg": QColor("#212529"),
         "log_fg": {
@@ -3763,7 +2188,6 @@ class MainWindow(CodexGuiMixin, QMainWindow):
     sig_set_after_finish_loops = pyqtSignal(dict)
     sig_set_auto_answer = pyqtSignal(bool, bool)
     sig_set_scroll_back = pyqtSignal(int)
-    sig_set_fable_config = pyqtSignal(dict)
     sig_set_trigger_patterns = pyqtSignal(dict)
     # Into the updater (its own thread).
     sig_update_check = pyqtSignal(bool)      # manual?
@@ -3813,30 +2237,20 @@ class MainWindow(CodexGuiMixin, QMainWindow):
         self._auto_choose = False
         self._auto_permission = True
         self._scroll_back_min = DEFAULT_SCROLL_BACK_MIN
-        # Fable refusal-recovery config (Advanced dialog). Empty pattern =
-        # use the built-in default.
-        self._fable_cfg: dict = {
-            "enabled": False, "all_windows": True, "delay": 180,
-            "steps": DEFAULT_FABLE_STEPS, "windows": [], "optout": [],
-            "resume": {}, "resume_loops": {},
-        }
         # User regex overrides, keyed by TRIGGER_SPECS key. Only patterns the
         # user actually changed are stored, so a future build's improved
         # default still wins for every trigger they never touched.
         self._trigger_patterns: dict = {}
-        # Opt-outs recorded while an Advanced dialog is open, so its OK
-        # cannot resurrect a window the user just took over.
-        self._pending_optouts: set = set()
         # title_key -> runs left, for after-finish budgets spent WHILE the
         # After finish dialog is open. Its spinner snapshots the count when
         # it opens, and a modal exec() keeps pumping this thread's queued
         # signals, so OK would write the pre-fire number back and re-arm a
-        # prompt that had just been used. Same hazard, same shape of fix as
-        # _pending_optouts above.
+        # prompt that had just been used.
         self._pending_loops: dict = {}
-        # Version string of the stale step script _load_settings rewrote
-        # ("v1.0.16" / "v2.0.1"), or False when nothing was migrated.
-        self._migrated_fable_steps = False
+        # Set by _load_settings when the stored settings show the model
+        # recovery removed in 3.2.0 had been switched on, and its owner has
+        # not been told yet.
+        self._recovery_removed_note = False
         # The release dict from the latest "update available" result, if any.
         self._pending_release: Optional[dict] = None
         # Single-instance "show me" listener thread (attached in main()).
@@ -4011,7 +2425,7 @@ class MainWindow(CodexGuiMixin, QMainWindow):
 
         # Driver settings live only in their corresponding visible card.
         self.advanced_btn = QPushButton("More settings…")
-        self.advanced_btn.setToolTip("Claude CLI: answering, model recovery, triggers and local API")
+        self.advanced_btn.setToolTip("Claude CLI: answering, triggers and local API")
         self.advanced_btn.clicked.connect(self._open_advanced)
         root.addLayout(header)
         self._build_cli_controls(root)
@@ -4249,14 +2663,12 @@ class MainWindow(CodexGuiMixin, QMainWindow):
             self.worker.set_after_finish_loops)
         self.sig_set_auto_answer.connect(self.worker.set_auto_answer)
         self.sig_set_scroll_back.connect(self.worker.set_scroll_back)
-        self.sig_set_fable_config.connect(self.worker.set_fable_config)
         self.sig_set_trigger_patterns.connect(
             self.worker.set_trigger_patterns)
 
         # Receive snapshots and logs.
         self.worker.snapshot.connect(self._on_claude_snapshot)
         self.worker.log.connect(self._append_log)
-        self.worker.fable_untick.connect(self._on_fable_untick)
         self.worker.loops_spent.connect(self._on_loops_spent)
         self.worker.running_changed.connect(self._on_claude_running)
         self._build_codex_worker()
@@ -4432,42 +2844,11 @@ class MainWindow(CodexGuiMixin, QMainWindow):
             + (f"{left} run(s) left" if left else
                "no runs left — set Loops again to re-arm"))
 
-    def _on_fable_untick(self, key: str) -> None:
-        """Stop enforcing the target model on a window the user took over.
-
-        Recorded in its own `optout` list rather than only by removing a tick,
-        because in all-windows mode there is no tick to remove — that made the
-        whole thing a silent no-op in the default configuration, with the log
-        claiming an untick that never happened and nothing surviving a restart.
-        """
-        if not key:
-            return
-        outs = list(self._fable_cfg.get("optout", []))
-        if key not in outs:
-            outs.append(key)
-        self._fable_cfg["optout"] = outs
-        # Also drop the explicit tick when there is one, so the Advanced list
-        # reflects reality.
-        wins = [w for w in self._fable_cfg.get("windows", [])
-                if title_key(str(w)) != key]
-        self._fable_cfg["windows"] = wins
-        # Remember it across a dialog that is open right now: its OK would
-        # otherwise write back the scope it snapshotted at construction.
-        self._pending_optouts.add(key)
-        self.sig_set_fable_config.emit(dict(self._fable_cfg))
-        self._save_settings()
-        self._append_log(
-            "info",
-            f"no longer steering {key!r} to the target model "
-            f"(you switched it by hand); re-tick it in Advanced to resume")
-
     def _reset_settings(self) -> None:
         """Put Claude CLI settings back to their shipped defaults.
 
         Destructive and not obviously undoable, so it asks first and names
-        what goes. Model recovery returns to OFF, which is how it ships —
-        a reset that left an autonomous feature running would be a surprise
-        in the wrong direction.
+        what goes.
         """
         if QMessageBox.question(
                 self, "Reset Claude CLI settings?",
@@ -4477,8 +2858,7 @@ class MainWindow(CodexGuiMixin, QMainWindow):
                 "  • clears per-window model and effort overrides\n"
                 "  • clears per-window after-finish prompts\n"
                 "  • clears excluded windows\n"
-                "  • restores the built-in trigger patterns\n"
-                "  • turns model recovery OFF and clears its window list\n\n"
+                "  • restores the built-in trigger patterns\n\n"
                 "Keep-awake and the start-up options are left as "
                 "they are. Continue?",
                 QMessageBox.StandardButton.Yes
@@ -4505,12 +2885,6 @@ class MainWindow(CodexGuiMixin, QMainWindow):
         self._pending_loops.clear()
         self._excluded_titles = set()
         self._trigger_patterns = {}
-        self._fable_cfg = {
-            "enabled": False, "all_windows": True,
-            "delay": 180, "steps": DEFAULT_FABLE_STEPS,
-            "windows": [], "optout": [], "resume": {}, "resume_loops": {},
-        }
-        self._pending_optouts.clear()
 
         # Push everything to the worker, then persist, so a crash between the
         # two cannot leave the running watcher and the saved state disagreeing.
@@ -4528,13 +2902,11 @@ class MainWindow(CodexGuiMixin, QMainWindow):
         self._scroll_back_min = DEFAULT_SCROLL_BACK_MIN
         self.sig_set_scroll_back.emit(DEFAULT_SCROLL_BACK_MIN)
         self.sig_set_trigger_patterns.emit({})
-        self.sig_set_fable_config.emit(dict(self._fable_cfg))
         self._save_settings()
         self._append_log(
             "info",
             f"settings reset to defaults (poll {DEFAULT_INTERVAL_S}s, buffer "
-            f"{DEFAULT_BUFFER_S}s, retry {DEFAULT_RETRY_S}s; model recovery "
-            f"off)")
+            f"{DEFAULT_BUFFER_S}s, retry {DEFAULT_RETRY_S}s)")
 
     def _collect_redacted_log(self) -> tuple:
         """(text, n_lines) — the whole activity log, oldest first, redacted.
@@ -4959,25 +3331,10 @@ class MainWindow(CodexGuiMixin, QMainWindow):
                 controls[key].setChecked(value)
 
     def _open_advanced(self) -> None:
-        # Current watched windows (title_key -> display) for the opt-in list.
-        # Persisted opt-ins not currently open are re-added inside the dialog
-        # so they can still be un-ticked.
-        seen = {}
-        for r in self._latest_snapshot:
-            if r.get("provider", "claude") != "claude":
-                continue
-            k = title_key(r["title"])
-            if k:
-                seen[k] = r["title"]
-        dlg = AdvancedDialog(self, dict(self._fable_cfg), seen,
-                             dict(self._trigger_patterns),
+        dlg = AdvancedDialog(self, dict(self._trigger_patterns),
                              {"choose": self._auto_choose,
                               "permission": self._auto_permission,
-                              "scroll_back_min": self._scroll_back_min},
-                             {"autostart": self.autostart_check.isChecked(),
-                              "boot": self.boot_check.isChecked(),
-                              "keep_awake": self.keep_awake_check.isChecked()}, scope="claude")
-        self._pending_optouts.clear()
+                              "scroll_back_min": self._scroll_back_min})
         _accepted = dlg.exec()
         if dlg.reset_requested:
             # The dialog was rejected on purpose so nothing it holds is
@@ -4985,23 +3342,6 @@ class MainWindow(CodexGuiMixin, QMainWindow):
             self._reset_settings()
             return
         if _accepted:
-            new_cfg = dlg.result_config()
-            # The dialog snapshotted the scope when it opened. If the watcher
-            # unticked a window while it was up, OK would resurrect it — and
-            # set_fable_config would then read that as a re-tick and clear the
-            # opt-out, so the tool resumed steering a window the user had just
-            # taken over, within one tick.
-            if self._pending_optouts:
-                new_cfg["windows"] = [
-                    w for w in new_cfg.get("windows", [])
-                    if title_key(str(w)) not in self._pending_optouts]
-                outs = list(new_cfg.get("optout", []))
-                for k in self._pending_optouts:
-                    if k not in outs:
-                        outs.append(k)
-                new_cfg["optout"] = outs
-                self._pending_optouts.clear()
-            self._fable_cfg = new_cfg
             _auto = dlg.result_auto()
             _auto_changed = (
                 _auto["choose"] != self._auto_choose
@@ -5048,39 +3388,15 @@ class MainWindow(CodexGuiMixin, QMainWindow):
                 # the new number; _api_apply only ever moves one direction.
                 self._stop_local_api()
                 self._api_apply()
-            self.sig_set_fable_config.emit(dict(self._fable_cfg))
             self.sig_set_trigger_patterns.emit(
                 dict(self._trigger_patterns))
             self._save_settings()
-            on = bool(self._fable_cfg.get("enabled"))
-            allw = bool(self._fable_cfg.get("all_windows", True))
-            scope = ("all watched windows" if allw
-                     else f"{len(self._fable_cfg.get('windows', []))} window(s)")
-            self._append_log(
-                "info",
-                "Fable-recover " + ("ON" if on else "OFF") + f"; scope: {scope}")
             if self._trigger_patterns:
                 self._append_log(
                     "warn",
                     "custom trigger pattern(s): "
                     + ", ".join(sorted(self._trigger_patterns))
                     + " — built-in defaults are overridden for these")
-            if on:
-                # NOT a prerequisite warning any more. It used to claim the
-                # feature needed /config → "Switch models when a message is
-                # flagged" = false, which measurement disproved: with that
-                # setting on, Claude Code switches by itself AND still prints
-                # the notice, so the recovery works either way. What actually
-                # surprises people is the part that types unprompted, so say
-                # that instead.
-                target = _last_model_step(
-                    _parse_recovery_steps(self._fable_cfg.get("steps", "")))
-                if target:
-                    self._append_log(
-                        "warn",
-                        f"any window in scope that is not on {target!r} will be "
-                        f"switched to it automatically, even without a "
-                        f"safeguard block")
 
     # ---- Settings persistence -------------------------------------------
 
@@ -5164,13 +3480,8 @@ class MainWindow(CodexGuiMixin, QMainWindow):
             raw_al = self.settings.value(
                 "after_finish_loops", "", type=str) or ""
             try:
-                loaded_al = json.loads(raw_al) if raw_al else {}
-                _done = self.settings.value(
-                    "after_finish_loops_v2", False, type=bool)
-                self._after_finish_loops = migrate_after_finish_loops(
-                    loaded_al, _done)
-                if not _done:
-                    self.settings.setValue("after_finish_loops_v2", True)
+                self._after_finish_loops = coerce_after_finish_loops(
+                    json.loads(raw_al) if raw_al else {})
             except Exception:
                 self._after_finish_loops = {}
             self._auto_choose = self.settings.value(
@@ -5179,34 +3490,6 @@ class MainWindow(CodexGuiMixin, QMainWindow):
                 "auto_permission", True, type=bool)
             self._scroll_back_min = max(0, self._settings_int(
                 "scroll_back_min", DEFAULT_SCROLL_BACK_MIN))
-            raw_f = self.settings.value("fable_cfg", "", type=str) or ""
-            try:
-                loaded_f = json.loads(raw_f) if raw_f else {}
-                if isinstance(loaded_f, dict):
-                    self._fable_cfg.update(loaded_f)
-                    # A hand-edited store can hold anything; a non-dict here
-                    # must collapse rather than reach the worker or dialog.
-                    if not isinstance(self._fable_cfg.get("resume"), dict):
-                        self._fable_cfg["resume"] = {}
-                    if not isinstance(
-                            self._fable_cfg.get("resume_loops"), dict):
-                        self._fable_cfg["resume_loops"] = {}
-                    # Saved settings win over the built-in default, so a user
-                    # who never customised the script would stay on the
-                    # v1.0.16 one — which types /model into the open picker
-                    # and then ESCs it away — even after upgrading. Migrate
-                    # that exact string; anything edited is left untouched.
-                    _steps, _label = migrate_fable_steps(
-                        self._fable_cfg.get("steps"))
-                    if _label:
-                        self._fable_cfg["steps"] = _steps
-                        # Which one it was decides what the notice should say
-                        # — the shipped scripts were broken for different
-                        # reasons, and a migration notice that describes the
-                        # wrong one is worse than none.
-                        self._migrated_fable_steps = _label
-            except Exception:
-                pass
             raw_t = self.settings.value("trigger_patterns", "", type=str) or ""
             try:
                 loaded_t = json.loads(raw_t) if raw_t else {}
@@ -5217,13 +3500,21 @@ class MainWindow(CodexGuiMixin, QMainWindow):
                     }
             except Exception:
                 self._trigger_patterns = {}
-            # Migrate the v1.0.16-dev layout, where the Fable detect pattern
-            # lived inside fable_cfg before all triggers became editable.
-            legacy = self._fable_cfg.pop("pattern", "")
-            if (isinstance(legacy, str) and legacy.strip()
-                    and "fable" not in self._trigger_patterns
-                    and legacy.strip() != TRIGGER_DEFAULTS.get("fable")):
-                self._trigger_patterns["fable"] = legacy.strip()
+            # Model recovery was removed in 3.2.0. Its stored settings
+            # ("fable_cfg") are left where they are and simply no longer
+            # read: an older copy sharing this store, such as one bundled
+            # with a companion app, may still use them. Someone who had it
+            # switched on is told once, rather than finding out from a
+            # session left sitting on a safeguard block.
+            try:
+                raw_f = self.settings.value("fable_cfg", "", type=str) or ""
+                old_f = json.loads(raw_f) if raw_f else {}
+                if (isinstance(old_f, dict) and old_f.get("enabled")
+                        and not self.settings.value(
+                            "recovery_removed_noted", False, type=bool)):
+                    self._recovery_removed_note = True
+            except Exception:
+                pass
         finally:
             for w in widgets:
                 w.blockSignals(False)
@@ -5244,47 +3535,15 @@ class MainWindow(CodexGuiMixin, QMainWindow):
         self.sig_set_auto_answer.emit(self._auto_choose,
                                       self._auto_permission)
         self.sig_set_scroll_back.emit(self._scroll_back_min)
-        self.sig_set_fable_config.emit(dict(self._fable_cfg))
         self.sig_set_trigger_patterns.emit(dict(self._trigger_patterns))
-        if self._migrated_fable_steps:
-            # Both halves vary: each old script broke differently and each
-            # replacement fixes something different. A shared tail put the
-            # previous version's fix on this version's notice — the same
-            # class of wrongness this dict was introduced to stop.
-            _why = {
-                "v1.0.16": ("it typed /model into the picker and then ESC'd "
-                            "it away, interrupting the running turn; the new "
-                            "one accepts the picker instead"),
-                "v2.0.1": ("it could only switch BACK to the target model, so "
-                           "it did nothing at all once Claude Code stopped "
-                           "offering a model picker; the new one switches to "
-                           "the fallback itself"),
-                "v2.0.1a": ("it ended on the switch back, leaving the session "
-                            "parked at the prompt holding half-finished work; "
-                            "the new one resumes it with 'continue'"),
-                "v2.0.2": ("it typed /model into a busy session, where Claude "
-                           "Code queues it and the switch never takes effect; "
-                           "the new one presses ESC first"),
-                "v2.0.4": ("its closing 'continue' is now <resume>, which "
-                           "types the per-window command configured in "
-                           "Advanced — or plain 'continue' when none is set"),
-                "v2.0.5": ("it retried the target without /compact, which a "
-                           "context-based block always refuses again; the "
-                           "new one lets the fallback FINISH, compacts the "
-                           "conversation, then switches back and types the "
-                           "per-window resume prompt"),
-            }.get(self._migrated_fable_steps,
-                  "it no longer matches how Claude Code behaves")
+        if self._recovery_removed_note:
             self._append_log(
                 "warn",
-                f"Fable-recover steps migrated from the "
-                f"{self._migrated_fable_steps} script: {_why}")
-            # Persist it, or the migration only ever lives in memory: the
-            # worker gets the new script but the stored one stays stale, so
-            # every launch migrates again and logs this warning again. The
-            # v1.0.16 migration had the same hole and nobody noticed, because
-            # the behaviour was right and only the log repeated.
-            self._save_settings()
+                "model recovery was removed in 3.2.0 and no longer runs: a "
+                "session blocked by safeguards, or out of quota on its model, "
+                "now waits for you instead of being switched to another "
+                "model (see Help)")
+            self.settings.setValue("recovery_removed_noted", True)
         # Apply keep-awake state immediately if the user had it ON before.
         if self.keep_awake_check.isChecked():
             self._apply_keep_awake(True)
@@ -5318,7 +3577,6 @@ class MainWindow(CodexGuiMixin, QMainWindow):
         self.settings.setValue("auto_choose", self._auto_choose)
         self.settings.setValue("auto_permission", self._auto_permission)
         self.settings.setValue("scroll_back_min", self._scroll_back_min)
-        self.settings.setValue("fable_cfg", json.dumps(self._fable_cfg))
         self.settings.setValue(
             "trigger_patterns", json.dumps(self._trigger_patterns))
 
@@ -6078,9 +4336,24 @@ immediately instead of waiting out the interval.</li>
 <code>continue</code>.</li>
 <li><b>Dead sessions.</b> An expired login cannot be fixed by typing, so it
 is reported once in the log and never poked at.</li>
-<li><b>Safeguard blocks</b> — see <b>Model recovery</b> below. Off by
-default.</li>
+<li><b>Safeguard blocks</b> — left alone. When a model's safeguards block a
+turn, nothing this tool could type would help: <code>continue</code> sends the
+same conversation back to the same model. The session waits for you, and
+<b>After finish</b> does not count it as finished. A model's own allowance
+running out is yours to handle in the same way: it carries no reset time, so
+there is nothing to wait for and nothing is typed.</li>
 </ul>
+<p><b>Model recovery was removed in 3.2.0.</b> Earlier versions had an opt-in
+script for safeguard blocks: switch to a fallback model, let it finish,
+<code>/compact</code>, switch back. It could also move a window to another
+model when one model's allowance ran out, and steer a window back to its
+target model on its own. It typed far more than <code>continue</code>,
+depended on Claude Code's dialogs and status bar staying exactly as they were,
+and needed a dozen timers and guards to stay safe — more machinery than the
+problem it solved, in the one tool that must not misfire into your sessions.
+It has been taken out, so a session that is merely waiting is resumed, and a
+session that needs a decision is left for you. If you had it switched on, the
+log says so once on the first start; its saved settings are left unused.</p>
 <p>Everything above is matched with regexes you can edit
 (<b>Claude CLI &#8594; More settings &#8594; Triggers</b>), because Anthropic re-words these banners
 without notice. Those patterns track the wording of a <i>current</i> Claude
@@ -6102,9 +4375,9 @@ this tool types ends with Enter. If the input box already holds text you have
 not sent, the line would go after your text and both would be submitted as
 one message. If a question or a permission prompt is open, the Enter would
 pick whichever option is highlighted, which on a permission prompt is
-"Yes". So a network <code>continue</code>, a limit resume, an After finish
-prompt and a Model recovery line all wait while either is on screen, and go
-out once the box is clear. The log says so once each time. This holds
+"Yes". So a network <code>continue</code>, a limit resume and an After
+finish prompt all wait while either is on screen, and go out once the box is
+clear. The log says so once each time. This holds
 wherever the prompt's cursor sits, even after the arrow keys have moved it
 off the first option. <b>Fire now</b> is your own instruction and is not
 held. Before 2.1.4, After finish in particular could answer a permission
@@ -6130,8 +4403,6 @@ until it fires.</li>
 <li><b>Sending</b> / <b>Sent</b> — typing right now / just typed.</li>
 <li><b>Cooldown</b> — sent recently; detection is suppressed for 15 minutes
 so the message still in scrollback can't trigger a second fire.</li>
-<li><b>Fable-recover</b> — a model-recovery script is running on that
-window.</li>
 <li><b>Limit prompt</b> — confirming the limit chooser, or answering
 another chooser the session was waiting on.</li>
 <li><b>Excluded</b> — you told it to ignore this window.</li>
@@ -6195,15 +4466,14 @@ stuck session like any other network error, and gets its
 <p>The Actions menu shows the After finish prompt and remaining loops;
 hovering Actions previews the prompt. Clearing the text turns it off for that
 window.</p>
-<p>Four idle-looking states deliberately never count as "finished":</p>
+<p>Three idle-looking states deliberately never count as "finished":</p>
 <ul>
 <li>a session never seen running while watched — a fresh shell sitting at a
 prompt is not a completed run;</li>
 <li>a standing safeguard notice — that session is <i>blocked</i>, not
-finished;</li>
+finished, and the prompt would only be refused again;</li>
 <li>the post-send cooldown — the fire's own follow-up is still in
-flight;</li>
-<li>a model recovery in progress — that script owns the window.</li>
+flight.</li>
 </ul>
 
 <h3>Claude CLI &#8594; More settings &#8594; Answering</h3>
@@ -6268,8 +4538,8 @@ authorise that work, so turn it off if you rely on reviewing those
 requests yourself.</p>
 <p>Two dialogs are deliberately left out of both switches: the safeguard
 picker and the <i>Switch model?</i> confirmation. Answering either changes
-which model the session runs on, and that belongs to <b>Model recovery</b>,
-which is opt-in for exactly that reason.</p>
+which model the session runs on, and that is your decision, so both are left
+for you.</p>
 <p>Both are detected by patterns you can edit on the <b>Triggers</b> tab
 (“Any chooser” and “Tool-permission prompt”); the permission pattern is what
 keeps the two switches apart, so a chooser matching it is never answered by
@@ -6419,197 +4689,37 @@ size check and hash apply either way.</p>
 an update is slow you can see which source was picked and what each one was
 actually doing at the time.</p>
 
-<h3>Claude CLI &#8594; More settings &#8594; Model recovery</h3>
-<p><b>Opt-in and off by default</b>, because it is the one feature that types
-more than <code>continue</code> and changes which model your session runs
-on.</p>
-<p><b>The problem.</b> When a model's safeguards block a turn, the session
-stalls on a model that refuses to work. The block judges the <i>whole
-conversation</i>, not the last message: every request re-sends the full
-history, so once the history itself is what trips the filter, retrying the
-same message can never pass — measured live, four recoveries in one evening
-and every switch back was blocked again within seconds. The one thing that
-clears such a block is <code>/compact</code>: it replaces the history with a
-summary, and the flagged content is gone.</p>
-<p><b>So a recovery is one cycle, not a ladder of retries:</b></p>
-<ol>
-<li>switch to the fallback model and <code>continue</code> — it
-<i>finishes</i> the work that was blocked;</li>
-<li>wait for that turn to actually end (nothing interrupts it — an early
-switch back would only be refused again);</li>
-<li><code>/compact</code>;</li>
-<li>switch back to the target model and type that window's <b>After
-recovery</b> prompt — fresh work on a clean context.</li>
-</ol>
-<p>Whether the run succeeded is judged a beat <i>after</i> it ends, once the
-screen has caught up: a refusal ends the new turn within seconds, real work
-keeps it running. The log then says <i>done (on Fable 5)</i>, or warns that
-the session ended on the wrong model or that the block still stands.</p>
-<p><b>Tries</b> (third column of the window list, default <b>1</b>) is how
-many recoveries <i>one block episode</i> may spend typing the resume prompt.
-It counts whole cycles, and only ones that <i>finish</i>: a cycle killed on
-the way (the window never came to the foreground, the run went stale) never
-attempted the thing the allowance is for, so it costs nothing. A new cycle
-only starts when a genuinely new block appears (each carries its own request
-id) — never back-to-back. A block
-right after a successful recovery means the prompt <i>itself</i> trips the
-filter, so one past the allowance a final run still lets the fallback finish
-and still compacts, but <b>parks</b>: the window ends up idle on the target
-model with nothing typed, and the log asks you to edit the prompt by hand.
-Once the notice has been gone for two minutes the episode is over and the
-allowance starts over — a recovery that works costs nothing.</p>
-<p>This is deliberately <i>not</i> the same as After finish's Loops. That one
-is a countdown for a one-shot task; this one is an allowance per block, for a
-standing "if this window gets blocked, do that instead" instruction, and a
-window with no prompt configured relies on it to bound how often a bare
-<code>continue</code> is retried.</p>
-<h4>When the quota runs out, not the conversation</h4>
-<p><b>Switch models when the quota runs out</b> (off by default, next to the
-enable box) handles a different failure from a safeguard block. A safeguard
-block is about what the <i>conversation</i> contains, and only
-<code>/compact</code> clears it. A per-model allowance running dry is about
-the <i>account</i>: nothing is wrong with the session, one model simply has
-nothing left — and it may have nothing left for days.</p>
-<p>So the answer is different too. With this on, the window switches to the
-fallback model, raises effort to <b>max</b>, and types <code>continue</code>:
-<b>no <code>/compact</code></b>, because discarding the history would throw
-away real work and the quota is not what the history says. The remaining tasks
-finish on the fallback instead of the window sitting idle until the
-allowance resets.</p>
-<p>While the banner is up, <b>the window is deliberately not steered back</b>
-to the target model — the usual drift correction is suspended for it. Putting
-it back would mean putting it on the model that cannot answer. Once the
-banner clears, the latch is released and normal handling resumes, which is
-also what happens the moment you untick the switch. "The banner cleared" has
-to be something actually <i>seen</i>: a window whose text could not be read
-that pass (Windows' UI Automation occasionally refuses) looks exactly like a
-window with no banner on it, so the latch is held until a pass genuinely
-reads the screen. Unticking the switch is your own instruction and releases
-it immediately, screen or no screen. The fallback is read from
-your script's <i>first</i> <code>/model</code> line, so it is whatever you
-chose; a script with no <code>/model</code> line means there is nowhere to
-go, and the window is left alone with a warning.</p>
-<p><b>It only acts on windows in model recovery's scope</b> — the windows
-ticked in the list, or all of them with <b>All windows</b>. Turning the
-switch on does not widen that. A window outside the scope that shows a quota
-banner (or a safeguard notice) is left exactly as it is, and the log says so
-once per episode: <code>… is out of quota on its model, but model recovery is
-not set up for this window — not switching</code>. And if model recovery is on
-while <i>no</i> window is ticked and <b>All windows</b> is off, it can never
-act at all; the log says that as well, whenever the settings are applied.
-Both lines exist because the alternative was found in use: every switch
-showing ON, a real quota banner on screen, and nothing happening with nothing
-to say why.</p>
-<p><b>Switching it yourself when the quota runs out does not untick the
-window.</b> Normally a model change this tool did not type is read as you
-taking that window over, and it is unticked. But with the quota banner up,
-moving to another model is simply the only thing to do — so it is treated like
-the tool's own detour instead: the window is held there, and goes back to the
-target model once the banner clears. (Earlier builds unticked it, and a window
-unticked that way stays unticked; if that emptied the list, the log line above
-is how you will now find out.)</p>
-<p>The detection pattern is on the <b>Triggers</b> tab as "Model quota
-exhausted", and is now written against the real banner:
-<i>"You&#8217;ve reached your &lt;Model&gt; limit. Run /usage-credits to
-continue or switch models with /model."</i> Note what it does <i>not</i>
-contain: a reset time. A per-model allowance is not a countdown, it is a wall
-until the week turns — which is why waiting it out is the wrong answer and
-switching is the right one. If Anthropic re-words it, paste the new text into
-the test box and adjust; no new build required.</p>
-<p>This is <i>not</i> the 5-hour limit. That one stops every model at once, so
-there is nothing to switch to; auto-continue waits for the reset and resumes
-by itself, as it always has.</p>
-
-<p><b>Scope.</b> "Apply to all watched windows" (the default) means recovery
-is <i>eligible</i> everywhere, but only the window actually showing a
-safeguard notice is ever touched. Untick it to restrict recovery to the
-windows you list.</p>
-<p><b>Keeping the window on target.</b> A window you tick explicitly is also
-steered back if it ends up on the fallback model with no notice showing — a
-switch-back that never landed, or Claude Code switching by itself. That
-happens after a grace period, spaced out, and capped, so it can never fight
-you. The target is simply the last <code>/model</code> step in your script; a
-script without one enforces nothing. This is why ticking a window is a bigger
-commitment than leaving it in all-windows mode.</p>
-<p>If <b>you</b> switch a window's model by hand, that is taken as your
-decision: the window is unticked automatically and left alone from then on.
-Tick it again in Claude CLI's More settings to resume enforcement.</p>
-<p><b>Step script</b>, one step per line — every line is editable, and the
-shipped default is only a starting point. The editor is sized to show the
-built-in script in full, so what you read is the whole recovery: if a script
-you wrote runs past the box, the rest is still there, just scrolled.</p>
-<ul>
-<li>plain text — typed, then Enter. A <code>/model X</code> line is skipped
-when the status bar already reads X, and always waits for a running turn to
-end first (a <code>/model</code> typed mid-turn is only queued and never
-takes effect).</li>
-<li><code>&lt;confirm&gt;</code> — accept whichever confirmable dialog is
-showing (the "Switch model?" prompt, or the safeguard chooser). Presses Enter
-exactly once per dialog, and does nothing at all when there is none.</li>
-<li><code>&lt;idle&gt;</code> — wait until the current turn ends and the
-session stays quiet for a while. No fixed duration: it takes as long as the
-work takes. A network outage does not count as finished.</li>
-<li><code>&lt;wait&gt;</code> / <code>&lt;wait:N&gt;</code> — pause for N
-seconds (bare <code>&lt;wait&gt;</code> uses the <b>Wait</b> value on this
-tab). Counts only time the session is actually <i>running</i>, so an outage
-costs the recovery nothing. The default script uses <code>&lt;idle&gt;</code>
-instead; this is for scripts that want a fixed budget.</li>
-<li><code>&lt;esc&gt;</code> — interrupts a running turn so the next step
-lands as a command instead of being queued. <b>Not</b> in the default script:
-the default never cuts a turn short. It is skipped on an idle session and
-never fires onto an open dialog.</li>
-<li><code>&lt;enter&gt;</code> — a bare Enter.</li>
-<li><code>&lt;effort&gt;</code> — restores this window's own <b>Effort</b>
-setting. Its partner is the plain <code>/effort max</code> the default script
-types on the fallback: a run that exists to get unstuck is worth the best
-thinking available, but leaving max in place afterwards would be this tool
-quietly changing a level you chose. A window with nothing configured has
-nothing to restore, so the step is skipped rather than guessing one.</li>
-<li><code>&lt;resume&gt;</code> — types the window's <b>After recovery</b>
-command (second column of the window list), or a plain <code>continue</code>
-when none is set, which picks the compacted summary back up. Types nothing on
-the parking run.</li>
-</ul>
-<p>Every step is bounded, so a dialog that never appears, a window that will
-not come to the foreground, or a turn that never ends can each be waited out
-and moved past rather than pinning the window forever.</p>
-
 <h3>Timings</h3>
 <ul>
 <li><b>Poll interval</b> (60s) — how often every window is read. Reading a
-window costs real time, and nothing here needs sub-minute latency. A pass
-occasionally comes back short: Windows' UI Automation can refuse a window,
-or the whole enumeration, for a moment. A window absent from one pass is
-therefore not treated as closed — the handle is checked with the OS first —
-because some of what is known about a window cannot be read off the screen a
-second time: how far an in-flight model recovery had got, the hold that
-keeps a session off a model whose allowance is gone, and how recently it was
-last typed into. And before giving up on the pass, the windows are listed
-once more two seconds later: the short list is nearly always a momentary
-blip, and a second look lets that pass go ahead with every window instead of
-skipping them for a whole interval. Only if a window is still missing on the
-second look does the log say so, once. A window that was really closed is
-confirmed closed by the OS and costs no wait.
-Since 2.1.4 the list of windows comes from Windows itself, and UI Automation
-is asked only about those windows. Before that, UI Automation listed every
-window on the desktop, one program at a time. One slow program could make a
-pass wait up to nine seconds, and that listing was also where the short
-lists came from. The old listing is still used if Windows' own list
-fails.</li>
+window costs real time, and nothing here needs sub-minute latency. The list
+of windows comes from Windows itself, and UI Automation is asked only about
+those windows; the old desktop-wide UI Automation listing is used only if
+Windows' own list fails. A window absent from one pass — UI Automation
+refused it for a moment, or it is not showing a Claude session right now —
+is not treated as closed: the handle is checked with the OS first, because
+some of what is known about a window cannot be read off the screen a second
+time: a pending limit's reset time, which chooser was already answered, and
+how recently it was last typed into. The log says so once, naming the
+window, and the window is simply looked at again on the next pass. A window
+that was really closed is confirmed closed by the OS and dropped.
+Until 3.2.0 a pass that came back short waited two seconds and listed the
+windows again. That second look dated from the desktop-wide listing, whose
+short lists the Windows listing no longer produces, and it had become a cost
+of its own: a terminal where Claude Code had exited left a window that was
+alive but no longer a Claude session, and every pass then waited two seconds
+for it, holding up the local API with it.</li>
 <li><b>Buffer</b> (60s) — extra margin past the stated reset time.</li>
 <li><b>Retry interval</b> (600s) — the gap between <code>continue</code>s
 while a session is network-stuck. Short values just bury the log: an outage
 here once ran 90 minutes.</li>
-<li><b>Wait</b> (Model recovery tab, 180s) — the duration a
-<code>&lt;wait&gt;</code> step asks for. Unused by the default script.</li>
 </ul>
 
 <h3>Starting over</h3>
 <p><b>Reset Claude CLI settings&#8230;</b> (at the foot of Claude CLI's
 More settings dialog) restores Claude timings, the
-per-window model and effort overrides, After finish prompts, exclusions,
-trigger patterns, and model recovery (back to off). It asks first and lists
-what it clears. Keep-awake and the start-up options are left as they
+per-window model and effort overrides, After finish prompts, exclusions
+and trigger patterns. It asks first and lists what it clears. Keep-awake and the start-up options are left as they
 are. Each Codex type has its own reset in its More settings dialog.</p>
 <p>Everything else you change is remembered across restarts, so the app comes
 back exactly as you left it.</p>
@@ -6662,8 +4772,8 @@ Claude Code window is named after its conversation, so the titles alone say
 what this machine is working on. Nothing in the log is terminal content; it
 never records what a session actually printed.</li>
 <li>Settings are keyed by window <i>title</i>, so two windows with identical
-titles share one set of settings — worth knowing before ticking one of them
-for model recovery.</li>
+titles share one set of settings: the same exclusion, model, effort and After
+finish prompt.</li>
 <li><b>Check updates</b> asks GitHub whether a newer release exists and can
 download, verify and swap the exe in place. The download <b>resumes</b>: a
 dropped connection keeps what arrived and the next attempt asks only for the
@@ -6686,46 +4796,31 @@ reports what is available.</li>
 # ===========================================================================
 
 class AdvancedDialog(QDialog):
-    """Claude-specific answering, triggers, local API and model recovery.
+    """Claude CLI's More settings: answering, triggers and local API.
 
-    The legacy General page is available to older callers; production opens
-    the Claude scope and places global options in AppSettingsDialog.
+    App-wide options (start-up, keep-awake) live in AppSettingsDialog.
 
     * **Triggers** — the regexes that decide when auto-continue fires. Editable
       because Anthropic re-words these banners without notice and a rename
       silently stops the tool from firing until a new build ships.
-    * **Fable recovery** — opt-in: when Fable's safeguards block a turn (the
-      session stalls on Fable), recover on a fallback model and switch back
-      after a delay.
     """
 
-    def __init__(self, parent, cfg: dict, windows: dict, patterns: dict,
-                 auto: dict = None, general: dict = None, scope: str = "all"):
+    def __init__(self, parent, patterns: dict, auto: dict = None):
         super().__init__(parent)
-        self.setWindowTitle("Claude CLI — More settings" if scope == "claude" else "Advanced")
-        # Set by the General tab's reset button. The dialog is then REJECTED
-        # rather than accepted, so its now-stale values are never written
-        # back over the defaults the reset is about to put in place.
+        self.setWindowTitle("Claude CLI — More settings")
+        # Set by the reset button. The dialog is then REJECTED rather than
+        # accepted, so its now-stale values are never written back over the
+        # defaults the reset is about to put in place.
         self.reset_requested = False
-        # Tall enough that the Model recovery page needs no scrolling on an
-        # ordinary screen, never taller than the screen actually has room for.
+        # Tall enough for the Triggers page's editor and test box, never
+        # taller than the screen actually has room for.
         _scr = QApplication.primaryScreen()
         _avail = _scr.availableGeometry().height() if _scr else 800
-        self.resize(660, max(480, min(760, _avail - 60)))
-        self._orig_windows = list(cfg.get("windows", []))
-        _res = cfg.get("resume")
-        self._orig_resume = dict(_res) if isinstance(_res, dict) else {}
-        _rl = cfg.get("resume_loops")
-        self._orig_resume_loops = dict(_rl) if isinstance(_rl, dict) else {}
+        self.resize(660, max(480, min(680, _avail - 60)))
         outer = QVBoxLayout(self)
         tabs = QTabWidget()
         outer.addWidget(tabs, 1)
         self._tabs = tabs
-
-        if scope != "claude":
-            gen_tab = QWidget()
-            tabs.addTab(gen_tab, "General")
-            self._build_general_tab(gen_tab, general or {})
 
         ans_tab = QWidget()
         tabs.addTab(ans_tab, "Answering")
@@ -6738,223 +4833,19 @@ class AdvancedDialog(QDialog):
         api_tab = QWidget()
         tabs.addTab(api_tab, "Local API")
         self._build_api_tab(api_tab)
-
-        # The densest page: in a scroll area so that on a short screen (or a
-        # high scaling factor) it scrolls instead of Qt squeezing the fixed-
-        # height script box under the next group — which is what it did the
-        # moment the page was split into groups.
-        fable_page = QWidget()
-        fable_tab = QScrollArea()
-        fable_tab.setWidgetResizable(True)
-        fable_tab.setFrameShape(QFrame.Shape.NoFrame)
-        fable_tab.setWidget(fable_page)
-        tabs.addTab(fable_tab, "Model recovery")
-        # Most used first: General, Answering, then model recovery; the
-        # regex editor and the companion-program API are rarely opened.
-        tabs.tabBar().moveTab(tabs.indexOf(fable_tab), 1 if scope == "claude" else 2)
         tabs.setCurrentIndex(0)
-        root = QVBoxLayout(fable_page)
-        # Three groups, in the order a reader needs them: whether and when it
-        # acts, what it types, and which windows it may type into.
-        g_act = QGroupBox("When it acts")
-        act = QVBoxLayout(g_act)
-        g_scr = QGroupBox("Recovery script")
-        scr = QVBoxLayout(g_scr)
-        g_win = QGroupBox("Which windows")
-        win = QVBoxLayout(g_win)
-
-        intro = QLabel(
-            "When safeguards block a turn: finish the work on a fallback "
-            "model, /compact, switch back. <b>Help</b> has the details."
-        )
-        intro.setWordWrap(True)
-        act.addWidget(intro)
-
-        prereq = QLabel(
-            "⚠ A ticked window is also kept on the script's target model "
-            "on its own, with no block involved."
-        )
-        prereq.setWordWrap(True)
-        prereq.setStyleSheet("font-weight: bold;")
-        prereq.setToolTip(
-            "Ticking a window means this types into it: whenever its model "
-            "is not the one your script targets, it sends /model to switch "
-            "it back — no safeguard block required. Switch a window's model "
-            "by hand and it is unticked automatically and left alone.")
-        act.addWidget(prereq)
-
-        form = QFormLayout()
-        # Fields at their natural width: a seconds box stretched across the
-        # whole dialog read as a text field.
-        form.setFieldGrowthPolicy(
-            QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
-        self.enable_chk = QCheckBox("Enable Fable refusal-recovery")
-        self.enable_chk.setChecked(bool(cfg.get("enabled", False)))
-        form.addRow(self.enable_chk)
-
-        self.quota_chk = QCheckBox(
-            "Switch models when the quota runs out")
-        self.quota_chk.setChecked(bool(cfg.get("quota_switch", False)))
-        self.quota_chk.setToolTip(
-            "A per-model allowance running dry stops that model for days, "
-            "while the fallback still works. With this on, the remaining "
-            "work is finished on the fallback instead of waiting for the "
-            "reset — and the window is NOT steered back until the quota "
-            "returns. Off by default: it changes which model your session "
-            "runs on. Not the 5-hour limit, which stops every model and can "
-            "only be waited out.")
-        form.addRow(self.quota_chk)
-
-        self.delay_spin = QSpinBox()
-        self.delay_spin.setRange(1, 3600)
-        self.delay_spin.setSuffix(" s")
-        try:
-            self.delay_spin.setValue(int(cfg.get("delay", 180) or 180))
-        except (TypeError, ValueError):
-            self.delay_spin.setValue(180)
-        form.addRow("Wait for <wait> steps", self.delay_spin)
-        act.addLayout(form)
-        root.addWidget(g_act)
-
-        detect_hint = QLabel(
-            "Detection pattern: <b>Triggers</b> tab → “Fable safeguard "
-            "block”.")
-        detect_hint.setWordWrap(True)
-        scr.addWidget(detect_hint)
-
-        steps_hint = QLabel(
-            "Steps, one per line — a plain line is typed + Enter. Hover for "
-            "<b>&lt;confirm&gt; &lt;idle&gt; &lt;wait&gt; &lt;esc&gt; "
-            "&lt;enter&gt; &lt;resume&gt;</b>.")
-        steps_hint.setToolTip(
-            "<b>&lt;confirm&gt;</b> accept whichever chooser/dialog is "
-            "showing (nothing if none)<br>"
-            "<b>&lt;idle&gt;</b> wait until the turn ends and the session "
-            "stays quiet<br>"
-            "<b>&lt;wait&gt;</b> / <b>&lt;wait:N&gt;</b> wait N seconds of "
-            "RUNNING time (outages do not count)<br>"
-            "<b>&lt;esc&gt;</b> interrupt a running turn (not in the "
-            "default script)<br>"
-            "<b>&lt;enter&gt;</b> a bare Enter<br>"
-            "<b>&lt;resume&gt;</b> type this window's After recovery "
-            "command ('continue' when empty)")
-        steps_hint.setWordWrap(True)
-        scr.addWidget(steps_hint)
-        _steps_src = cfg.get("steps")
-        if not isinstance(_steps_src, str) or not _steps_src.strip():
-            _steps_src = DEFAULT_FABLE_STEPS
-        self.steps_edit = QPlainTextEdit(_steps_src)
-        # Tall enough for the built-in script to be read without scrolling.
-        # This was a hard-coded 150px, which fitted until the script grew to
-        # ten lines and hid its own last step (<resume> — the one that types
-        # your prompt) below the fold. Deriving it from the default keeps the
-        # box honest if the script changes length again.
-        _lines = max(len(DEFAULT_FABLE_STEPS.strip().splitlines()), 10)
-        _fm = self.steps_edit.fontMetrics()
-        # The +1 line is slack, not decoration: the document's own margins and
-        # the frame together eat more than their nominal width, and a box that
-        # is one pixel short scrolls exactly like one that is short by ten.
-        self.steps_edit.setFixedHeight(
-            _fm.lineSpacing() * (_lines + 1)
-            + int(self.steps_edit.document().documentMargin()) * 2
-            + self.steps_edit.frameWidth() * 2)
-        scr.addWidget(self.steps_edit)
-        root.addWidget(g_scr, 1)
-
-        self.all_windows_chk = QCheckBox(
-            "Apply to all watched windows (recommended)")
-        self.all_windows_chk.setChecked(bool(cfg.get("all_windows", True)))
-        self.all_windows_chk.setToolTip(
-            "On: recovery is eligible on every watched window — but only the "
-            "window that actually shows the Fable notice is ever switched. "
-            "Off: restrict to the specific windows ticked below.")
-        win.addWidget(self.all_windows_chk)
-
-        after_hint = QLabel(
-            "Ticks apply only with “all windows” off. <b>After recovery</b> "
-            "= what &lt;resume&gt; types; <b>Tries</b> = how many per block "
-            "(default 1).")
-        after_hint.setWordWrap(True)
-        win.addWidget(after_hint)
-        self.win_list = QTableWidget()
-        self.win_list.setColumnCount(3)
-        self.win_list.setHorizontalHeaderLabels(
-            ["Window", "After recovery", "Tries"])
-        _wl_h = self.win_list.horizontalHeader()
-        _wl_h.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        _wl_h.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        self.win_list.verticalHeader().setVisible(False)
-        self.win_list.setSelectionMode(
-            QTableWidget.SelectionMode.NoSelection)
-        opted = {title_key(str(t)) for t in cfg.get("windows", [])
-                 if title_key(str(t))}
-        resume_cfg = cfg.get("resume")
-        if not isinstance(resume_cfg, dict):
-            resume_cfg = {}
-        loops_cfg = cfg.get("resume_loops")
-        if not isinstance(loops_cfg, dict):
-            loops_cfg = {}
-        rows = dict(windows)                       # title_key -> display title
-        for k in opted:
-            rows.setdefault(k, k + "   (not currently open)")
-        # A stored command keeps its row visible even if the window is
-        # neither open nor ticked, so it can still be edited or cleared.
-        for k in list(resume_cfg) + list(loops_cfg):
-            kk = title_key(str(k))
-            if kk:
-                rows.setdefault(kk, kk + "   (not currently open)")
-        self._has_rows = bool(rows)
-        if not rows:
-            self.win_list.setRowCount(1)
-            ph = QTableWidgetItem("(no Claude windows detected yet)")
-            ph.setFlags(Qt.ItemFlag.ItemIsEnabled)
-            self.win_list.setItem(0, 0, ph)
-        else:
-            ordered = sorted(rows.items(), key=lambda kv: kv[1].lower())
-            self.win_list.setRowCount(len(ordered))
-            for r, (k, disp) in enumerate(ordered):
-                it = QTableWidgetItem(disp)
-                it.setFlags(Qt.ItemFlag.ItemIsEnabled
-                            | Qt.ItemFlag.ItemIsUserCheckable)
-                it.setCheckState(Qt.CheckState.Checked if k in opted
-                                 else Qt.CheckState.Unchecked)
-                it.setData(Qt.ItemDataRole.UserRole, k)
-                self.win_list.setItem(r, 0, it)
-                cmd = QTableWidgetItem(
-                    str(resume_cfg.get(k, "") or ""))
-                cmd.setToolTip(
-                    "Typed by the <resume> step after /compact and the "
-                    "switch back. Empty = 'continue'.")
-                self.win_list.setItem(r, 1, cmd)
-                try:
-                    _n = max(1, min(99, int(loops_cfg.get(k, 1))))
-                except (TypeError, ValueError):
-                    _n = 1
-                lp = QTableWidgetItem(str(_n))
-                lp.setToolTip(
-                    "Recoveries per block episode that may type the command "
-                    "(default 1). One past this, the final run parks the "
-                    "window instead of typing it again. Counts attempts "
-                    "within one block and starts over at the next block.")
-                self.win_list.setItem(r, 2, lp)
-            self.win_list.resizeColumnToContents(0)
-        win.addWidget(self.win_list, 1)
-        root.addWidget(g_win, 1)
-
-        # The command and loops columns matter in all-windows mode too, so
-        # the table stays editable; only the tick column is scope, and it
-        # is remembered for when "all windows" is switched off.
-        self.win_list.setEnabled(self._has_rows)
 
         btns = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok
             | QDialogButtonBox.StandardButton.Cancel)
         btns.accepted.connect(self.accept)
         btns.rejected.connect(self.reject)
-        if scope == "claude":
-            self.gen_reset_btn = QPushButton("Reset Claude CLI settings…")
-            self.gen_reset_btn.clicked.connect(self._request_reset)
-            btns.addButton(self.gen_reset_btn, QDialogButtonBox.ButtonRole.ResetRole)
+        self.reset_btn = QPushButton("Reset Claude CLI settings…")
+        self.reset_btn.setToolTip(
+            "Timings, overrides, exclusions, trigger patterns and answering "
+            "— all back to default. Asks first.")
+        self.reset_btn.clicked.connect(self._request_reset)
+        btns.addButton(self.reset_btn, QDialogButtonBox.ButtonRole.ResetRole)
         outer.addWidget(btns)
 
     def _build_api_tab(self, tab) -> None:
@@ -7032,65 +4923,9 @@ class AdvancedDialog(QDialog):
         root.addWidget(path)
         root.addStretch(1)
 
-    def _build_general_tab(self, tab, general: dict) -> None:
-        self._general_dry_run = bool(general.get("dry_run", False))
-        root = QVBoxLayout(tab)
-        intro = QLabel(
-            "Set once and forget: how Auto-Continue starts, and whether it "
-            "keeps the machine awake. See <b>Help</b>.")
-        intro.setWordWrap(True)
-        root.addWidget(intro)
-
-        start_box = QGroupBox("Start-up")
-        sb = QVBoxLayout(start_box)
-        self.gen_autostart_chk = QCheckBox("Start watching when the app opens")
-        self.gen_autostart_chk.setChecked(bool(general.get("autostart", True)))
-        self.gen_autostart_chk.setToolTip(
-            "Begin watching automatically when the app opens — including "
-            "the automatic relaunch after a self-update. Without this, "
-            "protection lapses until you click Start.")
-        sb.addWidget(self.gen_autostart_chk)
-        self.gen_boot_chk = QCheckBox("Start with Windows")
-        self.gen_boot_chk.setChecked(bool(general.get("boot", False)))
-        self.gen_boot_chk.setToolTip(
-            "Launch Auto-Continue when you sign in to Windows. With the box "
-            "above also ticked, protection runs from boot with nothing to "
-            "click. A per-user registry Run entry, no admin needed.")
-        sb.addWidget(self.gen_boot_chk)
-        root.addWidget(start_box)
-
-        run_box = QGroupBox("While it runs")
-        rb = QVBoxLayout(run_box)
-        self.gen_keep_awake_chk = QCheckBox("Keep the computer awake")
-        self.gen_keep_awake_chk.setChecked(
-            bool(general.get("keep_awake", True)))
-        self.gen_keep_awake_chk.setToolTip(
-            "Stops sleep / Modern Standby while this runs — needed if a "
-            "limit is to be picked up hours after you walked away.")
-        rb.addWidget(self.gen_keep_awake_chk)
-        root.addWidget(run_box)
-
-        root.addStretch(1)
-        # Destructive, so kept apart at the bottom and worded as what it does.
-        reset_row = QHBoxLayout()
-        reset_row.addStretch(1)
-        self.gen_reset_btn = QPushButton("Reset Claude CLI settings…")
-        self.gen_reset_btn.setToolTip(
-            "Timings, overrides, exclusions, trigger patterns, answering and "
-            "model recovery — all back to default. Asks first.")
-        self.gen_reset_btn.clicked.connect(self._request_reset)
-        reset_row.addWidget(self.gen_reset_btn)
-        root.addLayout(reset_row)
-
     def _request_reset(self) -> None:
         self.reset_requested = True
         self.reject()
-
-    def result_general(self) -> dict:
-        return {"autostart": self.gen_autostart_chk.isChecked(),
-                "boot": self.gen_boot_chk.isChecked(),
-                "keep_awake": self.gen_keep_awake_chk.isChecked(),
-                "dry_run": self._general_dry_run}
 
     def _build_answer_tab(self, tab, auto: dict) -> None:
         root = QVBoxLayout(tab)
@@ -7134,7 +4969,7 @@ class AdvancedDialog(QDialog):
 
         # Group 2: scrolled-up windows. The explanation wraps on its own
         # line: a long label beside the spin box set the dialog's minimum
-        # width past what it may open at (test_fable Z2 caught it).
+        # width past what it may open at (test_safeguard Z2 checks it).
         sb_box = QGroupBox("Scrolled-up windows")
         sbl = QVBoxLayout(sb_box)
         sb_text = QLabel(
@@ -7394,25 +5229,6 @@ class AdvancedDialog(QDialog):
                 + "\n\nFix them on the Triggers tab, or press “Reset this”.")
             return
 
-        # Recovery steps are typed verbatim into a terminal. Braces are key
-        # syntax to the sender, so they are escaped rather than rejected —
-        # but an empty script with the feature enabled is a silent no-op.
-        cfg = self.result_config()
-        if cfg["enabled"]:
-            if not _parse_recovery_steps(cfg["steps"]):
-                QMessageBox.warning(
-                    self, "No recovery steps",
-                    "Fable refusal-recovery is enabled but the step list is "
-                    "empty, so nothing would happen.\n\nAdd steps, or untick "
-                    "“Enable Fable refusal-recovery”.")
-                return
-            if not cfg["all_windows"] and not cfg["windows"]:
-                QMessageBox.warning(
-                    self, "No windows selected",
-                    "Fable refusal-recovery is enabled but no windows are "
-                    "ticked, so it would never run.\n\nTick at least one "
-                    "window, or choose “Apply to all watched windows”.")
-                return
         super().accept()
 
     def result_patterns(self) -> dict:
@@ -7424,53 +5240,6 @@ class AdvancedDialog(QDialog):
             if src and src != spec["default"]:
                 out[spec["key"]] = src
         return out
-
-    def result_config(self) -> dict:
-        if not self.win_list.isEnabled():
-            wins = list(self._orig_windows)        # nothing to edit; preserve
-            resume = dict(self._orig_resume)
-            loops = dict(self._orig_resume_loops)
-        else:
-            wins = []
-            resume = {}
-            loops = {}
-            for i in range(self.win_list.rowCount()):
-                it = self.win_list.item(i, 0)
-                if it is None:
-                    continue
-                k = it.data(Qt.ItemDataRole.UserRole)
-                if not k:
-                    continue
-                if (it.flags() & Qt.ItemFlag.ItemIsUserCheckable
-                        and it.checkState() == Qt.CheckState.Checked):
-                    wins.append(k)
-                # The command survives an untick — clearing the TEXT is how
-                # you delete it, so tick/untick doesn't silently eat it.
-                cmd_it = self.win_list.item(i, 1)
-                cmd = (cmd_it.text().strip() if cmd_it is not None else "")
-                if cmd:
-                    resume[k] = cmd
-                # Tries: anything that isn't a number is the default of 1,
-                # and only non-defaults are stored.
-                lp_it = self.win_list.item(i, 2)
-                try:
-                    n = int((lp_it.text() if lp_it is not None else "1")
-                            .strip() or "1")
-                except ValueError:
-                    n = 1
-                n = max(1, min(99, n))
-                if n != 1:
-                    loops[k] = n
-        return {
-            "enabled": self.enable_chk.isChecked(),
-            "quota_switch": self.quota_chk.isChecked(),
-            "all_windows": self.all_windows_chk.isChecked(),
-            "delay": self.delay_spin.value(),
-            "steps": self.steps_edit.toPlainText(),
-            "windows": wins,
-            "resume": resume,
-            "resume_loops": loops,
-        }
 
 
 # ===========================================================================

@@ -4,12 +4,12 @@ shipped exe actually runs.
 
 These scenarios used to live in test_tick.py against the CLI watcher, which
 was a second copy of this logic. Deleting that copy (v2.0.5) would have left
-the core limit flow with no coverage at all: test_fable.py exercises only the
-model-recovery section of the tick. So the scenarios moved here, onto the loop
-that ships.
+the core limit flow with no coverage at all, so the scenarios moved here, onto
+the loop that ships. What the tick does about a safeguard block is
+test_safeguard.py's job.
 
-Same harness as test_fable.py: stub windows, recorded sends, a controllable
-clock. Exits non-zero on any failure.
+Stub windows, recorded sends, a controllable clock. Exits non-zero on any
+failure.
 """
 import os
 import sys
@@ -97,7 +97,6 @@ gui.send_text_lines = _send_lines
 gui.send_keys = lambda w, k, dry_run=False: True
 gui.send_continue = lambda w, dry_run=False: _send_lines(w, ["continue"])
 gui.list_tab_titles = lambda w: []
-gui._ENUM_RETRY_WAIT_S = 0   # the in-pass re-list must not slow the suite
 
 
 def new_watcher():
@@ -374,8 +373,8 @@ check("E1 later window still processed", (6, ["continue"]) in SENT)
 
 # ...and a window that throws MIDWAY through processing, after the tick has
 # already committed to it, must not take the rest of the loop down either.
-# Only the Fable block used to be guarded; everything after it ran bare, so
-# one window's failure meant every window enumerated later went unwatched
+# Only one block of the tick used to be guarded; everything after it ran bare,
+# so one window's failure meant every window enumerated later went unwatched
 # for that pass — with a single generic 'tick error' line as the symptom.
 set_now(T0)
 
@@ -445,13 +444,13 @@ try:
     w = _ghost_watcher()
     st_before = w._states[7]
     st_before.last_sent_utc = T0              # a cooldown only memory knows
-    st_before.fable_step = 3                  # a recovery already under way
+    st_before.chooser_sig = "answered-once"   # a chooser already answered
     reset([], {})                             # UIA hands back nothing
     w._tick()
     check("F3 a still-open window missed by one pass keeps its state",
           7 in w._states)
-    check("F4 and keeps the in-flight recovery step",
-          getattr(w._states.get(7), "fable_step", None) == 3)
+    check("F4 and keeps which chooser was already answered",
+          getattr(w._states.get(7), "chooser_sig", None) == "answered-once")
     check("F5 and keeps the send cooldown",
           getattr(w._states.get(7), "last_sent_utc", None) == T0)
     check("F6 the hiccup is reported rather than passing silently",
@@ -463,29 +462,6 @@ try:
     w._tick()
     check("F7 and reported once, not once per tick",
           not any("missing from this pass" in m for _, m in LOGS_F))
-
-    # ...and a hiccup that has passed two seconds later costs nothing at all:
-    # the pass lists the windows again and carries on with the full set.
-    _calls = []
-
-    def _flaky():
-        _calls.append(1)
-        return [] if len(_calls) == 1 else [FakeWin(7, "win")]
-
-    w2 = _ghost_watcher()
-    LOGS_F.clear()
-    _real_find = gui.find_terminal_windows
-    gui.find_terminal_windows = _flaky
-    try:
-        _calls.clear()
-        w2._tick()
-    finally:
-        gui.find_terminal_windows = _real_find
-    check("F7b a window missing from the first look is looked for again, "
-          "within the same pass", len(_calls) == 2)
-    check("F7c found again, it is processed as normal and not reported "
-          "missing", not any("missing from this pass" in m for _, m in LOGS_F)
-          and 7 in w2._states)
 
     # A queued row command must survive the same hiccup: the window is still
     # there to receive it.
@@ -543,8 +519,8 @@ _cases = [
      "'" + _secret + "' #0a40; sending 'continue' every 600s until recovery"),
     ("2026-01-01 00:00:00  [fire]  after-finish → '" + _secret +
      "' #0a40: '" + _secret + "'"),
-    ("2026-01-01 00:00:00  [fire]  Fable-recover → 'win' #1234: "
-     "'/effort high'"),
+    ("2026-01-01 00:00:00  [fire]  sending ['/effort high', '', 'continue'] "
+     "to 'win' #1234"),
     ("2026-01-01 00:00:00  [info]  after-finish on '" + _secret +
      "': no runs left (Loops 0)"),
 ]
@@ -797,32 +773,24 @@ w.set_after_finish_loops("not-a-dict")
 check("G10 a corrupt loops store collapses to defaults",
       w._after_finish_loops == {})
 
-# v2.0.6 stored a CAP where 0 meant unlimited; the countdown store reads 0 as
-# spent. Migrating that exact value is the difference between a prompt that
-# repeats forever and one that silently never fires again. These drive the
-# SHIPPED function — an earlier version of this check compared a dict
-# comprehension written here against itself, so a broken migration would
-# have sailed through it.
-check("G11 the v2.0.6 'unlimited' cap migrates to the new sentinel",
-      gui.migrate_after_finish_loops({"a": 0, "b": 3, "c": 1}, False)
-      == {"a": -1, "b": 3, "c": 1})
-check("G11b once migrated, 0 is a real value and stays put",
-      gui.migrate_after_finish_loops({"a": 0, "b": 3}, True)
-      == {"a": 0, "b": 3})
+# The stored countdown is read back through the same coercion the worker
+# uses, so a hand-edited or truncated store cannot raise at start-up.
+check("G11 a stored 0 means spent and -1 unlimited, as written",
+      gui.coerce_after_finish_loops({"a": 0, "b": 3, "c": -1})
+      == {"a": 0, "b": 3, "c": -1})
 check("G11c garbage and out-of-range values are coerced, not raised",
-      gui.migrate_after_finish_loops(
-          {"a": "2", "b": "x", "c": -9, "d": None}, True)
+      gui.coerce_after_finish_loops(
+          {"a": "2", "b": "x", "c": -9, "d": None})
       == {"a": 2, "c": -1})
 check("G11d a non-dict store collapses instead of exploding",
-      gui.migrate_after_finish_loops("not-a-dict", True) == {}
-      and gui.migrate_after_finish_loops(None, False) == {})
+      gui.coerce_after_finish_loops("not-a-dict") == {}
+      and gui.coerce_after_finish_loops(None) == {})
 
 # The After finish dialog snapshots the remaining count when it opens, and a
 # modal exec() keeps pumping queued signals — so the worker can spend a run
 # while the dialog is up. Writing the untouched pre-fire number back on OK
 # would silently re-arm a prompt that had just been used, which is exactly
-# the repeat-firing the budget exists to prevent. (The file already carries
-# the same class of fix for the fable opt-out list.)
+# the repeat-firing the budget exists to prevent.
 check("G12 a run spent while the dialog was open wins over the snapshot",
       gui.reconcile_loops(chosen=1, snapshot=1, fired=0) == 0)
 check("G12b but moving the spinner is an explicit instruction and wins",
@@ -950,10 +918,8 @@ check("H16 answering schedules a fast follow-up tick",
 SENT.clear()
 
 # The safeguard picker and the "Switch model?" confirmation are choosers
-# too, but confirming either CHANGES WHICH MODEL the session runs on. That
-# belongs to the recovery feature, which is opt-in for exactly that reason —
-# and answering out of band also puts a second Enter on a dialog the
-# recovery's own <confirm> step is about to answer.
+# too, but confirming either CHANGES WHICH MODEL the session runs on, and
+# that is the user's decision -- so neither is ever auto-answered.
 _SG2 = "safegu" "ards flagged"
 _SW2 = "Switch t" "o"
 _ED2 = "Edit promp" "t and retry"
@@ -969,7 +935,7 @@ for _name, _text in (("safeguard picker", PICKER2),
     w = new_watcher()
     w._tick()
     w._tick()
-    check(f"H15 the {_name} is left to the recovery, not auto-answered",
+    check(f"H15 the {_name} is left for the user, not auto-answered",
           not SENT)
 
 # A send is REFUSED when the window will not come to the foreground — which

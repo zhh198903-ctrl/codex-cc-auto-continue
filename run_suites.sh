@@ -4,7 +4,7 @@
 # quietly stopped existing -- the absence of a failure line is not a pass.
 cd "$(dirname "$0")" || exit 1
 rc=0
-for t in test_parse.py test_fable.py test_gui_tick.py test_local_api.py \
+for t in test_parse.py test_safeguard.py test_gui_tick.py test_local_api.py \
          test_selftrigger.py test_updater.py test_singleinstance.py; do
   out=$(PYTHONIOENCODING=utf-8 python "$t" 2>&1); code=$?
   ok=$(printf '%s' "$out" | grep -cE '^\[OK ?\]')

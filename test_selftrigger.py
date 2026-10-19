@@ -44,9 +44,9 @@ DETECTORS = [
     ("connection error", ac.parse_econnreset_stuck, "types continue"),
     ("truncated response", ac.parse_server_error_stuck, "types continue"),
     ("oauth expired", ac.parse_oauth_expired, "warns (harmless)"),
-    ("safeguard notice", ac.parse_fable_refusal, "starts a recovery"),
-    ("safeguard picker", ac.parse_fable_picker, "presses a BARE ENTER"),
-    ("switch dialog", ac.parse_switch_model_prompt, "presses a BARE ENTER"),
+    ("safeguard notice", ac.parse_fable_refusal, "holds After finish"),
+    ("safeguard picker", ac.parse_fable_picker, "holds the auto-answer"),
+    ("switch dialog", ac.parse_switch_model_prompt, "holds the auto-answer"),
 ]
 
 

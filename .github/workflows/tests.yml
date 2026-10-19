@@ -20,7 +20,7 @@ jobs:
       - name: Legacy checks
         run: |
           python test_parse.py
-          python test_fable.py
+          python test_safeguard.py
           python test_gui_tick.py
           python test_local_api.py
           python test_selftrigger.py

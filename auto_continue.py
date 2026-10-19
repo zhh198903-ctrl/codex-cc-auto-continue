@@ -42,7 +42,7 @@ import uiautomation as auto
 # A "-dev" suffix does not help: parse_version() strips it, so 1.0.17-dev and
 # 1.0.17 compare equal. Leave this at the LAST RELEASED version while
 # developing; release.yml refuses to publish if it disagrees with the tag.
-APP_VERSION = "3.1.2"
+APP_VERSION = "3.2.0"
 
 
 # ---------------------------------------------------------------------------
@@ -502,24 +502,14 @@ NETWORK_POST_MATCH_TAIL = 6000
 # whatever they have typed in the input box).
 PROMPT_POST_MATCH_TAIL = 1500
 
-# The "Switch model?" dialog needs a LOOSER allowance than the limit picker.
-# Both are modals, but this one is detected in order to press Enter *on it*
-# during a Fable recovery, and Claude Code stacks its full footer below the
-# modal — input box, border rules, multi-line status bar, hints — every line
-# padded to the terminal width, so the 1500 used for the limit picker is far
-# too tight here — an OPEN dialog would look stale and stall the recovery.
-#
-# 4000 rather than the 6000 network allowance, because the two failure modes
-# are NOT equally bad:
-#   too small → the dialog isn't seen, <esc> fires and cancels it, <confirm>
-#     times out, and the turn resumes on the old model. Wasteful, but it stays
-#     inside the recovery and the per-window resume budget stops it repeating.
-#   too large → a dialog the USER dismissed a while ago still matches, so
-#     <confirm> presses Enter into their input box and submits whatever they
-#     had half-typed as a prompt. That has side effects in their session and
-#     cannot be undone.
-# Prefer the recoverable failure. ~20 padded rows at 200 columns clears a
-# normal footer; FABLE_CONFIRM_MAX_S bounds the stall if it ever doesn't.
+# The "Switch model?" dialog and the safeguard picker need a LOOSER allowance
+# than the limit picker. Both are modals, but Claude Code stacks its full
+# footer below them — input box, border rules, multi-line status bar, hints —
+# every line padded to the terminal width, so the 1500 used for the limit
+# picker would make an OPEN dialog look stale. They are detected only so the
+# chooser auto-answer leaves them alone: either one changes which model the
+# session runs on, and that is the user's call. ~20 padded rows at 200
+# columns clears a normal footer.
 SWITCH_POST_MATCH_TAIL = 4000
 
 
@@ -636,31 +626,6 @@ def turn_completed_after(text: str, pos: int) -> bool:
     """
     p = _PROMPT_ECHO_RE.search(text, pos)
     return bool(p and _TURN_DONE_RE.search(text, p.end()))
-
-
-# Claude Code stamps every safeguard block with its own request id, a few
-# lines under the notice. It is the only exact way to tell one block from the
-# next: the TUI redraws at a fixed layout, so a fresh block lands at the same
-# distance from the tail as the one it replaced, and a purely positional test
-# cannot see it. Measured live — a block 2s after a recovery finished went
-# unnoticed for the rest of the session because both sat 1924 chars up.
-REQUEST_ID_RE = re.compile(r"Request\s+ID:\s*(\S+)", re.I)
-
-
-def fable_refusal_id(text: str, pattern=None):
-    """Request id belonging to the most recent safeguard notice, or None.
-
-    Only ids that appear AFTER the notice count; one further up belongs to an
-    older block. Returns None when the notice has no id in view yet, which is
-    normal for a few hundred milliseconds while the block is still printing —
-    callers must treat None as "no new information", never as "new block".
-    """
-    rx = pattern or FABLE_REFUSAL_RE
-    matches = list(rx.finditer(text))
-    if not matches:
-        return None
-    m = REQUEST_ID_RE.search(text, matches[-1].end())
-    return m.group(1) if m else None
 
 
 # A detector can only tell an application-printed banner from the user
@@ -827,13 +792,13 @@ def parse_server_error_stuck(text: str, pattern=None) -> bool:
     return True
 
 
-# Fable refusal-recovery (opt-in GUI feature). When Fable's safety guardrails
-# block a turn, Claude Code stalls here (CC auto-switch off) with a safeguard
-# notice that names Fable and says it can't respond with that model. The GUI's
-# Advanced feature detects this per opted-in window and drives a recovery
-# (switch to a fallback model, continue, then switch back to Fable after a
-# delay). The default pattern is user-overridable in the Advanced dialog; its
-# `\s+` usage also keeps this source from self-matching in a watched terminal.
+# A safeguard block. When a model's safety guardrails block a turn, Claude
+# Code stalls with a notice that names the model and says it can't respond
+# with it. Nothing is typed into such a session: 'continue' would only be
+# refused again. The watcher uses this to keep After finish from treating a
+# blocked session as a finished one. (Until 3.2.0 it also started an opt-in
+# model-recovery script; that was removed.) The default pattern is
+# user-overridable in the Advanced dialog.
 # Model-agnostic on purpose. The phrase is what identifies a safeguard block;
 # the model in front of it is whatever is current, and that changes — Opus 4.8
 # retired and Opus 5 shipped inside this project's lifetime, so naming one
@@ -853,57 +818,12 @@ DEFAULT_FABLE_PATTERN = (
 FABLE_REFUSAL_RE = re.compile(DEFAULT_FABLE_PATTERN, re.IGNORECASE)
 
 
-# Claude Code's status bar names the active model in square brackets near the
-# very bottom of the viewport. Only used to REPORT what a recovery ended on —
-# never to drive keystrokes — so a missed read costs a log line, nothing more.
-# Written with \s so this source can't match its own pattern in a watched
-# terminal, and the family list is open-ended enough to survive renames.
-# Matched by STRUCTURE, not by a list of model names. The status line renders
-# the active model in brackets followed by a context bar and a percentage, and
-# that shape is stable while the names are not: Opus 4.8 was retired and Opus 5
-# arrived within this project's lifetime. Enumerating families means the next
-# rename silently turns the drift check into a no-op — the same wording drift
-# that has broken detection here before. Bracketed tokens that are NOT the
-# status line (build tags like the ones a statusline plugin prints) lack the
-# bar-and-percentage tail and are ignored. Bar glyphs are written as escapes so
-# this source cannot match its own pattern in a watched terminal.
-MODEL_BAR_RE = re.compile(
-    r"\[\s*([^\]\n]{1,32}?)\s*\]\s+[█▓▒░]{2,}\s*\d{1,3}\s*%"
-)
-
-# Fallback for a customised status line with no bar: the known families. Kept
-# only as a second chance — the structural match above is the primary path.
-MODEL_FAMILY_RE = re.compile(
-    r"\[\s*((?:Fable|Opus|Sonnet|Haiku|Mythos)[^\]\n]{0,24}?)\s*\]",
-    re.IGNORECASE,
-)
-
-
-def current_model(text: str):
-    """Model label shown in the status bar, or None if it isn't visible.
-
-    Returns what the bar actually says (e.g. the family plus its version), so
-    a log line can name it exactly. Takes the LAST occurrence: the bar is
-    redrawn at the bottom, so the most recent one is the live state.
-    """
-    matches = MODEL_BAR_RE.findall(text or "")
-    if matches:
-        return matches[-1]
-    matches = MODEL_FAMILY_RE.findall(text or "")
-    return matches[-1] if matches else None
-
-
 def fable_refusal_distance(text: str, pattern=None):
     """Chars between the END of the latest safeguard notice and the end of the
     buffer, or None if there is no in-range notice.
 
-    Callers use this to tell a NEW block from the one they already handled.
-    The notice lingers in scrollback long after a recovery finishes (measured:
-    tens of minutes), so "is a notice visible" cannot answer that question. The
-    distance can only GROW as the session prints more, so a match that is
-    suddenly CLOSER to the tail is a fresh notice — which matters because the
-    recovery ends by retrying the very message that was flagged, making an
-    immediate re-block the likeliest next event.
+    Tail-anchored with the network allowance: a notice scrolled further up
+    than that is history, not a block the session is sitting on now.
     """
     rx = pattern or FABLE_REFUSAL_RE
     matches = list(rx.finditer(text))
@@ -914,7 +834,7 @@ def fable_refusal_distance(text: str, pattern=None):
 
 
 def parse_fable_refusal(text: str, pattern=None) -> bool:
-    """True if a Fable safety-guardrail block sits near the tail of the buffer.
+    """True if a safety-guardrail block sits near the tail of the buffer.
     `pattern` may be a user-compiled re.Pattern from the Advanced dialog;
     defaults to FABLE_REFUSAL_RE. Tail-anchored like the other network parsers
     so a stale notice further up scrollback doesn't retrigger."""
@@ -926,10 +846,8 @@ def parse_fable_refusal(text: str, pattern=None) -> bool:
 # (the affirmative "Yes, switch…" line) is pre-selected, so a plain Enter
 # confirms it. We anchor on the affirmative + negative option PAIR — not the
 # far-above "Switch model?" header, which the padded multi-line description
-# pushes ~900 chars away on a real (full-width) terminal. The recovery WAITS
-# for this and confirms it BEFORE sending 'continue' — a blind Enter fired
-# before the dialog renders lands in the input box and the continue then runs
-# on the old model.
+# pushes ~900 chars away on a real (full-width) terminal. Detected so the
+# chooser auto-answer never takes it: answering it changes the model.
 # NOTE: the two option strings are deliberately NOT written out together
 # anywhere in this file. This source is routinely displayed inside a watched
 # terminal, and a verbatim pair here would make the tool detect a dialog that
@@ -950,10 +868,8 @@ SWITCH_MODEL_RE = re.compile(
 # earn a blind Enter. (Same de-fanging convention as the patterns above; the
 # test file splits the literals with string concatenation for this reason.)
 #
-# Option 1 is pre-selected, so a bare Enter accepts the model switch — the
-# session recovers without typing /model at all. This is the real recovery
-# path; the /model + "Switch model?" dance is only needed to go BACK to the
-# blocked model afterwards.
+# Option 1 is pre-selected, so a bare Enter would accept the model switch.
+# That is why the chooser auto-answer must recognise it and leave it alone.
 # Anchored on the option PAIR, and deliberately not naming either model: the
 # fallback model name changes with every release. Written with \s+ so this
 # source can't self-match in a watched terminal.
@@ -965,9 +881,9 @@ FABLE_PICKER_RE = re.compile(
 
 def parse_fable_picker(text: str, pattern=None) -> bool:
     """True if the safeguard picker is open at the tail of the buffer, i.e. a
-    bare Enter accepts the pre-selected "Switch to <fallback>" option.
+    bare Enter would accept the pre-selected "Switch to <fallback>" option.
     Tail-anchored like the other modals so a stale one further up scrollback
-    can't make us press Enter into the input box.
+    does not count.
 
     A match on a composer line (see `_is_composer_line`) is dropped — the
     user typing this text is not an open picker, and a bare Enter would
@@ -981,64 +897,6 @@ def parse_fable_picker(text: str, pattern=None) -> bool:
     if len(text) - m.end() > SWITCH_POST_MATCH_TAIL:
         return False
     return True
-
-
-# A per-model quota running dry is a DIFFERENT problem from the 5-hour limit,
-# and has a different answer. The 5-hour limit stops every model, so waiting
-# for the reset is the only move. A weekly per-model allowance stops one model
-# while the others still work — so the remaining tasks can simply be finished
-# somewhere else, and waiting days for the reset is pure waste.
-#
-# Written from the shape of Claude Code's other limit banners rather than from
-# a captured sample: the machine this was built on had its Fable allowance
-# refilled, so the real wording will not appear for days. That is exactly why
-# this pattern is EDITABLE in Advanced -> Triggers with a live test box — when
-# the real banner shows up, paste it in and adjust, no new build required.
-#
-# Deliberately narrow: it demands a model name AND a limit/quota word AND a
-# reset clause. A looser rule would fire on any terminal that merely discusses
-# a limit, and this one changes which model your session runs on.
-# The \s+ separators (rather than literal spaces) keep this source from
-# matching its own pattern when the watchdog reads a terminal showing it.
-MODEL_QUOTA_RE = re.compile(
-    # Anchored on the real banner, captured 2026-08-14:
-    #
-    #     You've reach·ed your <Model> limit. Run /usage-credits to continue
-    #     or switch models with /model.
-    #
-    # The first guess demanded a reset clause, because every other limit
-    # banner carries one. This one has no time in it at all — and that is the
-    # point: a per-model allowance is not a countdown, it is a wall until the
-    # week turns. What it does carry is the remedy in its own words, "switch
-    # models", which anchors this far better than a timestamp would and is
-    # exactly what keeps it clear of the 5-hour banner ("hit your session
-    # limit · resets …"), where switching models buys nothing.
-    # (De-fanged with · above so this source can't match itself on screen.)
-    r"reach(?:ed)?\s+your\s+[\w.\s\-]{0,24}?limit\b"
-    r"[\s\S]{0,160}?"
-    r"(?:switch\s+model|/model\b|usage[-\s]?credits)",
-    re.IGNORECASE,
-)
-
-# How far above the tail a quota banner may sit and still count as current.
-# Same reasoning as the safeguard notice: once a session has scrolled on, an
-# old banner is history, not a live block.
-QUOTA_POST_MATCH_TAIL = 3000
-
-
-def parse_model_quota(text: str, pattern=None) -> bool:
-    """True if a per-model quota banner is live at the tail of the buffer.
-
-    Tail-anchored and composer-aware for the same reasons as the other
-    detectors: a banner scrolled far up is stale, and text on the input line
-    is something the user typed, not something Claude Code printed.
-    """
-    rx = pattern or MODEL_QUOTA_RE
-    matches = [m for m in rx.finditer(text)
-               if not _is_composer_line(text, m.start())]
-    if not matches:
-        return False
-    return len(text) - matches[-1].end() <= QUOTA_POST_MATCH_TAIL
 
 
 def parse_switch_model_prompt(text: str, pattern=None) -> bool:
@@ -1343,7 +1201,7 @@ def classify_prompt(text: str, chooser_pattern=None, permission_pattern=None,
     of waiting it is, because the answers differ: a permission prompt and an
     ordinary chooser both take Enter, the limit picker's other option costs
     money and must never be answered automatically, and the switch-model
-    dialog belongs to the recovery script rather than to whoever is watching.
+    dialog changes the session's model, so it is left to whoever is watching.
 
     Order is most-specific-first on purpose. The limit picker and the
     switch-model dialog are both choosers as far as CHOOSER_RE is concerned,
@@ -1694,7 +1552,8 @@ TRIGGER_SPECS = [
         "default": LIMIT_PROMPT_RE.pattern,
         "groups": 0,
         "help": "The interactive “What do you want to do?” chooser. "
-                "Matching it presses Enter to accept “Stop and wait”.",
+                "Matching it marks the window as waiting for you; nothing is "
+                "pressed, since its other option is paid extra usage.",
     },
     {
         "key": "retry",
@@ -1730,11 +1589,12 @@ TRIGGER_SPECS = [
     },
     {
         "key": "fable",
-        "label": "Fable safeguard block",
+        "label": "Safeguard block",
         "default": DEFAULT_FABLE_PATTERN,
         "groups": 0,
-        "help": "Starts the Fable refusal-recovery (only when that feature is "
-                "enabled above).",
+        "help": "A turn blocked by a model's safeguards. Nothing is typed for "
+                "it; a session showing one is not treated as finished by "
+                "After finish.",
     },
     {
         "key": "fable_picker",
@@ -1744,9 +1604,8 @@ TRIGGER_SPECS = [
         # Help text avoids quoting both option strings together — see the
         # de-fanging note above FABLE_PICKER_RE.
         "help": "The two-option chooser shown with the safeguard notice "
-                "(“Session paused”). Option 1 offers the fallback model and "
-                "is pre-selected, so Enter alone performs the whole "
-                "recovery — no /model needed.",
+                "(“Session paused”). Its pre-selected option changes the "
+                "model, so it is never auto-answered.",
     },
     {
         "key": "chooser",
@@ -1767,23 +1626,12 @@ TRIGGER_SPECS = [
                 "when the separate permission switch is on.",
     },
     {
-        "key": "model_quota",
-        "label": "Model quota exhausted",
-        "default": MODEL_QUOTA_RE.pattern,
-        "groups": 0,
-        "help": "A per-model allowance running dry (not the 5-hour limit). "
-                "Only acted on when “Switch models when the quota runs out” "
-                "is ticked. The shipped default is written from the shape of "
-                "the other banners, not from a captured sample — when you see "
-                "the real one, paste it into the test box below and adjust.",
-    },
-    {
         "key": "switch_model",
         "label": "“Switch model?” dialog",
         "default": SWITCH_MODEL_RE.pattern,
         "groups": 0,
         "help": "The Yes/No confirmation shown when changing model with "
-                "/model. The recovery waits for this before pressing Enter.",
+                "/model. It changes the model, so it is never auto-answered.",
     },
 ]
 
@@ -2008,8 +1856,8 @@ def send_text_lines(window_ctrl, lines, dry_run: bool = False) -> bool:
                               interval=0.02)
             except Exception:
                 # A throw here used to escape into the watcher's per-window
-                # loop, which has no guard of its own outside the Fable
-                # block — so one window's failed send stopped every window
+                # loop, which then had no guard of its own — so one
+                # window's failed send stopped every window
                 # after it from being looked at that tick, with a single
                 # generic 'tick error' line as the only symptom. Report the
                 # failure instead; callers already treat False as "retry
@@ -2032,9 +1880,9 @@ def sendkeys_literal(text) -> str:
     type the wrong thing — it RAISES (`{` → ValueError, `{task}` → TypeError).
     That exception used to escape send_text_lines and abort the whole tick,
     which meant every window enumerated after the offending one silently
-    stopped being watched. Recovery steps are free text typed by the user in
-    the Advanced dialog, so braces are entirely plausible ("continue with the
-    {plan}"). Only braces are special here — %, ^, + and parentheses are
+    stopped being watched. After finish prompts are free text typed by the
+    user, so braces are entirely plausible ("continue with the {plan}").
+    Only braces are special here — %, ^, + and parentheses are
     literal to SendKeys unless they follow a modifier key spec.
     """
     # Single pass on purpose: chained str.replace would re-escape the braces

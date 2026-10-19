@@ -1,0 +1,54 @@
+{
+  "version": "3.2.0",
+  "date": "2026-10-19",
+  "exe_sha256": "ce39b4a0212c3bd09401400c6a1f79573c4715ca93a14a59f420d05dc96456c4",
+  "exe_bytes": 28003846,
+  "source_checks": {
+    "legacy_suites": 7,
+    "legacy_checks": 682,
+    "unittest": 155,
+    "pytest": 96,
+    "subtests": 19
+  },
+  "packaged_selftest_passed": true,
+  "real_claude_cli_ccdebug": {
+    "scope": "one ccdebug probe window, watcher limited to its recorded handle",
+    "permission_prompt_answered_once": true,
+    "chooser_answered_once_option_1": true,
+    "switch_model_dialog_left_open_with_both_switches_on": true,
+    "after_finish_fired_once_then_spent": true,
+    "exited_claude_terminal_pass_seconds": {
+      "3.2.0": 0.03,
+      "3.1.2_baseline": 2.06
+    },
+    "errors_logged": 0
+  },
+  "installed_exe_verified": {
+    "path": "D:\\claude\\auto_continue\\dist\\Auto-Continue.exe",
+    "previous_backed_up_sha256": "744702be16b40d88797b26bc724890ce13a02e4d47f81446f56daf84512771c5",
+    "profile": "isolated settings, Claude CLI only, dry-run while watching",
+    "title": "Auto-Continue v3.2.0",
+    "claude_settings_tabs": [
+      "Answering",
+      "Triggers",
+      "Local API"
+    ],
+    "removed_recovery_notice_once": true,
+    "removed_recovery_notice_not_repeated_after_restart": true,
+    "stored_recovery_settings_left_unchanged": true,
+    "poll_changed_in_gui_and_persisted_after_restart": [
+      15,
+      16
+    ],
+    "monitor_refresh_read_utc_advanced": true,
+    "dry_run_detected_open_chooser_without_typing": true,
+    "local_api_version_and_auth": [
+      "3.2.0",
+      401
+    ],
+    "packaged_keystroke_path_via_api_with_monitoring_off": true
+  },
+  "user_codex_windows_operated": false,
+  "claude_login_or_underlying_changes": false,
+  "control_bundle_modified": false
+}
