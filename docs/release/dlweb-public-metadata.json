@@ -4,7 +4,7 @@
     "display": "Codex/CC Auto-Continue",
     "tagline": "Codex 与 Claude 的 Windows 自动续接工具",
     "desc": "支持 Codex 桌面版、Codex CLI 和 Claude CLI 的独立监测。",
-    "detail": "Codex EXE、Codex CLI 和 Claude CLI 通过三个切换栏使用各自设置，活动日志固定在底部。Codex 桌面最近活动默认显示 5 个，可自定义；每个会话可独立设置模型、推理强度和完成后续接。支持额度恢复与有限网络重试，权限默认完全访问，自动工具权限批准默认开启，也可改为等待人工批准。最近活动支持配置；自动输入只作用于核实的当前可见 Codex 会话，不监测 ChatGPT 普通聊天或 Work 会话。单文件免安装。 3.1.0 新增配套程序调用的 Codex 会话接口、操作回执及事件通知；同一会话的多个窗口合并处理，操作结果不明确时暂停，避免重复发送。会话正文读取仍需单独开启。 3.1.1 修复独立 EXE 在中文或特殊字符目录下的升级，一次点击完成校验、替换和重启，保留设置及监测开关；Control 继续使用其内置副本。 3.1.2 修复旧独立版本首次升级后可能出现的 Python DLL 启动错误。 3.2.0 精简 Claude CLI：删除模型恢复，被安全拦截或模型额度用完的会话原样等待处理、不再自动输入；Claude Code 退出后留下的终端不再拖慢每轮监测。",
+    "detail": "Codex 桌面版、Codex CLI 与 Claude CLI 各自设置、独立监测：额度恢复后自动续接，网络出错自动重试，可按会话设置模型、推理强度和完成后的续接任务。工具权限请求默认自动批准，可改为人工批准；Codex 桌面版不处理 ChatGPT 普通聊天和 Work 会话。单文件免安装。",
     "tags": [
       "Codex EXE",
       "Codex CLI",
@@ -44,7 +44,7 @@
     "display_en": "Codex/CC Auto-Continue",
     "tagline_en": "A Windows auto-continue companion for Codex and Claude",
     "intro_en": "Codex desktop, Codex CLI and Claude CLI have separate settings in three tabs, with the activity log at the bottom. Desktop recent activities default to five and are configurable, with per-session model, effort and follow-ups. Supports quota recovery and bounded network retries. Full access and automatic tool approval are defaults; manual approval is available. Recent activities can be configured; automatic input requires a verified visible Codex conversation. ChatGPT chats and Work conversations are excluded. Single file, no install.",
-    "detail_en": "Codex desktop, Codex CLI and Claude CLI have separate settings in three tabs, with the activity log at the bottom. Desktop recent activities default to five and are configurable, with per-session model, effort and follow-ups. Supports quota recovery and bounded network retries. Full access and automatic tool approval are defaults; manual approval is available. Recent activities can be configured; automatic input requires a verified visible Codex conversation. ChatGPT chats and Work conversations are excluded. Single file, no install. Version 3.1.0 adds Codex session access, operation receipts and event notifications for companion programs. Multiple windows for one session are handled together; uncertain operations pause to avoid repeated sends. Reading conversation text still requires separate opt-in. Version 3.1.1 repairs standalone EXE updates in folders with Unicode or special characters, completing verification, replacement and restart in one action while retaining settings and monitor switches. Control continues using its built-in copy. Version 3.1.2 fixes a possible Python DLL startup error after the first update from older standalone releases. Version 3.2.0 streamlines Claude CLI: model recovery is removed, so a session blocked by safeguards or out of its model allowance waits for you with nothing typed, and a terminal where Claude Code has exited no longer slows each pass.",
+    "detail_en": "Separate settings and independent monitoring for Codex desktop, Codex CLI and Claude CLI: sessions resume after a usage limit lifts, retry after network errors, and can each have their own model, effort and follow-up. Tool-permission requests are approved automatically by default, or left for you. ChatGPT chats and Work conversations are not touched. Single file, no install.",
     "tags_en": [
       "Codex desktop",
       "Codex CLI",
@@ -85,8 +85,8 @@
       "label_en": "AI Skills · Claude Code / Codex",
       "tagline": "让 AI 助手自己去读 Auto-Continue 的日志",
       "tagline_en": "Lets your AI assistant read Auto-Continue's log",
-      "note": "Claude Code 和 Codex 都可以安装此可选技能，读取活动日志并排查配置。v3.2.0 主程序支持 Codex EXE、Codex CLI 和 Claude CLI 的独立监测；运行主程序不依赖技能。",
-      "note_en": "Both Claude Code and Codex can use this optional skill to read logs and diagnose settings. The v3.2.0 executable independently watches Codex desktop, Codex CLI and Claude CLI. The executable does not require the skill.",
+      "note": "Claude Code 和 Codex 都可安装的可选技能，用来读取活动日志、排查配置；主程序不依赖它。",
+      "note_en": "An optional skill for Claude Code or Codex that reads the activity log and helps diagnose settings. The executable does not need it.",
       "license": "MIT 开源 · 免费",
       "license_en": "MIT licensed · free",
       "installs": [
