@@ -309,6 +309,11 @@ def download_asset(url: str,
     raise last_err
 
 
+# Extra seconds the chooser waits past the probe budget before it treats a
+# source that has not answered as unreachable.
+PROBE_GRACE_S = 5.0
+
+
 def choose_source(version: str, github_url: str, budget: float = 3.0):
     """Pick the faster of GitHub and the mirror for `version`.
 
@@ -325,14 +330,27 @@ def choose_source(version: str, github_url: str, budget: float = 3.0):
 
     mirror = mirror_zip_url(version)
     results = {}
-    with _cf.ThreadPoolExecutor(max_workers=2) as ex:
+    ex = _cf.ThreadPoolExecutor(max_workers=2)
+    try:
         futs = {ex.submit(probe_speed, u, 1 << 17, int(budget) or 1): name
                 for name, u in (("github", github_url), ("mirror", mirror))}
-        for fut in _cf.as_completed(futs, timeout=budget + 5):
-            try:
-                results[futs[fut]] = fut.result()
-            except Exception:
-                results[futs[fut]] = None
+        try:
+            for fut in _cf.as_completed(futs, timeout=budget + PROBE_GRACE_S):
+                try:
+                    results[futs[fut]] = fut.result()
+                except Exception:
+                    results[futs[fut]] = None
+        except _cf.TimeoutError:
+            # A source still silent past the budget is the slow one, not a
+            # reason to call the whole update off. Until 3.3.1 this raised out
+            # of here and the download failed outright whenever GitHub was
+            # slow to answer, even with the mirror ready (seen 2026-10-20 on a
+            # 3.2.0 client; a second click happened to work).
+            pass
+    finally:
+        # Do not wait for a probe that is still hanging; its own socket
+        # timeout ends it in the background.
+        ex.shutdown(wait=False, cancel_futures=True)
 
     g, m = results.get("github"), results.get("mirror")
 

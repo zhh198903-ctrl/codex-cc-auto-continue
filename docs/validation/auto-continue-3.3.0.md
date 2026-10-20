@@ -13,3 +13,5 @@ Completed checks:
 Not covered: permission prompts and questions (left to the user by design), model and effort changes (not done), and a live usage-limit or network error in the desktop app, which cannot be raised on demand; their classification is tested on real transcript records from this machine.
 
 User Codex windows were not operated. No Claude login or underlying Claude change was made. EXE SHA-256: `58cfbbfe68638d1887ab6cf2bf07abcdad6d6e6837c618e269fc7c367744d080`.
+
+Public acceptance: GitHub release v3.3.0 is Latest with the local EXE as its asset; the download site serves both 3.3.0 packages (size, SHA-256, ZIP CRC and HTTP 206 checked over the public link), only the Auto-Continue card changed, and the server keeps 3.3.0, 3.2.0, 3.1.2, 3.1.1 and 3.1.0. The unmodified published 3.2.0 client's first Update now failed ("1 (of 2) futures unfinished": the update source probe gave up while one source was silent); the second attempt chose the mirror, verified, replaced and reopened as 3.3.0 with settings kept and monitors off. The chooser is fixed in 3.3.1.

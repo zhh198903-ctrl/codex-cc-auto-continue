@@ -104,6 +104,16 @@
     }
   },
   "changelog": {
+    "3.3.1": {
+      "date": "2026-10-20",
+      "items": [
+        {
+          "t": "fix",
+          "zh": "修复一键升级在 GitHub 响应慢时直接失败的问题：没有及时响应的下载源按不可用处理，改用另一个来源。",
+          "en": "Fixes one-click updates failing outright when GitHub was slow to answer: a source that does not answer in time is treated as unreachable and the other source is used."
+        }
+      ]
+    },
     "3.3.0": {
       "date": "2026-10-20",
       "items": [
@@ -166,36 +176,6 @@
           "t": "fix",
           "zh": "下载校验失败时自动尝试另一下载源；替换失败会重新打开原版本并记录原因。Control 继续使用其内置副本。",
           "en": "A failed download integrity check tries the other source; a failed replacement reopens the previous version and records the reason. Control continues using its built-in copy."
-        }
-      ]
-    },
-    "3.1.0": {
-      "date": "2026-10-18",
-      "items": [
-        {
-          "t": "new",
-          "zh": "新增供配套程序使用的 Codex 会话接口，可查看会话状态、提交操作并查询回执；事件通知及时更新状态。",
-          "en": "Adds Codex session access for companion programs, with state, actions, operation receipts and live event notifications."
-        },
-        {
-          "t": "improve",
-          "zh": "同一 Codex 会话在多个窗口显示时合并处理，避免重复批准或重复续接；前台或会话发生变化时先重新核对。",
-          "en": "Coalesces multiple windows displaying one Codex session to avoid duplicate approvals or follow-ups, and rechecks after focus or session changes."
-        },
-        {
-          "t": "fix",
-          "zh": "修复任务上下文或页面信息插入后，已提交消息的确认可能被打断的问题；结果不明确时暂停，避免重复发送。",
-          "en": "Fixes submission confirmation when task context or page information precedes the user message; uncertain results pause rather than being resent."
-        },
-        {
-          "t": "improve",
-          "zh": "配套程序按需读取最近会话及原文上下文，保留格式并支持分页；正文读取仍由单独开关控制。",
-          "en": "Companions can request recent sessions and paginated original conversation text while preserving formatting. Text access remains separately opt-in."
-        },
-        {
-          "t": "improve",
-          "zh": "改善问题卡片、停止操作和后台队列的响应，接管与自动监测协作时保留既定恢复及续接配置。",
-          "en": "Improves question cards, stop actions and queued work while retaining configured recovery and follow-ups during companion handoff."
         }
       ]
     }

@@ -1,0 +1,42 @@
+{
+  "version": "3.3.1",
+  "date": "2026-10-20",
+  "exe_sha256": "7c59c91ce1c153d21844853229a60b2a4f95db130709c32f162df7096481a300",
+  "exe_bytes": 28029426,
+  "change": "update source chooser: a probe that has not answered within the budget counts as unreachable instead of failing the update",
+  "source_checks": {
+    "legacy_suites": 7,
+    "legacy_checks": 686,
+    "unittest": 174,
+    "pytest": 96,
+    "subtests": 19,
+    "new_updater_cases": [
+      "CS1 silent GitHub falls through to mirror",
+      "CS2 note names it unreachable",
+      "CS3 choice does not wait for the hung probe",
+      "CS4 neither answering falls back to GitHub"
+    ],
+    "old_behavior_reproduced_by_test": "TimeoutError: 1 (of 2) futures unfinished"
+  },
+  "packaged_selftest_passed": true,
+  "installed_exe_verified": {
+    "path": "D:\\claude\\auto_continue\\dist\\Auto-Continue.exe",
+    "previous_backed_up_sha256": "58cfbbfe68638d1887ab6cf2bf07abcdad6d6e6837c618e269fc7c367744d080",
+    "title": "Auto-Continue v3.3.1",
+    "tabs": [
+      "Codex EXE",
+      "Codex CLI",
+      "Claude CLI",
+      "Claude EXE"
+    ],
+    "claude_exe_row_running": true,
+    "poll_changed_in_gui_and_kept_after_restart": [
+      2,
+      3
+    ],
+    "update_check": "up to date (v3.3.1)"
+  },
+  "user_codex_windows_operated": false,
+  "claude_login_or_underlying_changes": false,
+  "control_bundle_modified": false
+}

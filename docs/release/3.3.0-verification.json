@@ -45,5 +45,40 @@
   ],
   "user_codex_windows_operated": false,
   "claude_login_or_underlying_changes": false,
-  "control_bundle_modified": false
+  "control_bundle_modified": false,
+  "public_download_verification": {
+    "version": "3.3.0",
+    "github_release": "https://github.com/zhh198903-ctrl/codex-cc-auto-continue/releases/tag/v3.3.0",
+    "source_commit": "b55130862739eacd1d154e600a19723b598a41b1",
+    "exe_sha256": "58cfbbfe68638d1887ab6cf2bf07abcdad6d6e6837c618e269fc7c367744d080",
+    "exe_bytes": 28029650,
+    "packages": {
+      "Auto-Continue_dist_v3_3_0.zip": {
+        "bytes": 27700609,
+        "sha256": "c4301f263ccbdd73f73c162093d06e2742558e80ce2c539eca2e69e180049670"
+      },
+      "Auto-Continue-Skill_dist_v3_3_0.zip": {
+        "bytes": 10499,
+        "sha256": "6ce42d74b9db38816aa96ddbffae1fbc33318b0c7cded8ebfca241d852d4de38"
+      }
+    },
+    "github_and_zip_exe_match_local": true,
+    "public_download_verified": true,
+    "http_range_verified": true,
+    "other_homepage_content_identical": true,
+    "server_versions_retained": [
+      "3.3.0",
+      "3.2.0",
+      "3.1.2",
+      "3.1.1",
+      "3.1.0"
+    ]
+  },
+  "public_legacy_client_upgrade": {
+    "original_version": "3.2.0",
+    "updated_version": "3.3.0",
+    "first_attempt": "failed: update source probe timed out (\"1 (of 2) futures unfinished\") although the mirror was reachable",
+    "second_attempt": "passed: mirror chosen, verified, replaced, restarted as 3.3.0; settings kept; monitors stayed off; previous EXE kept as .bak",
+    "fixed_in": "3.3.1"
+  }
 }

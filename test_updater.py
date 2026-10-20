@@ -345,6 +345,39 @@ check_true("a partial from another asset is discarded, not resumed",
            and open(_dest5, "rb").read() == PAYLOAD)
 
 
+print("---- a source that never answers does not cancel the update ----")
+import threading
+import time as _time
+
+_release = threading.Event()
+_real_probe = updater.probe_speed
+_real_grace = updater.PROBE_GRACE_S
+
+
+def _probe(url, sample=0, timeout=0, hang=("github",)):
+    if any(h == "github" and "github" in url or h == "mirror" and "github" not in url for h in hang):
+        _release.wait(10)
+        return None
+    return 4096.0
+
+
+try:
+    updater.PROBE_GRACE_S = 0.3
+    updater.probe_speed = _probe
+    _t0 = _time.monotonic()
+    url, is_zip, note = updater.choose_source("3.3.1", "https://github.com/x/releases/download/v3.3.1/Auto-Continue.exe", 0.2)
+    _took = _time.monotonic() - _t0
+    check_true("CS1 a silent GitHub falls through to the mirror", is_zip and url.endswith("_dist_v3_3_1.zip"))
+    check_true("CS2 the note says GitHub did not answer", "github unreachable" in note)
+    check_true(f"CS3 and the choice does not wait for the hung probe ({_took:.1f}s)", _took < 2)
+    updater.probe_speed = lambda url, sample=0, timeout=0: _probe(url, hang=("github", "mirror"))
+    url, is_zip, note = updater.choose_source("3.3.1", "https://github.com/x/releases/download/v3.3.1/Auto-Continue.exe", 0.2)
+    check_true("CS4 with neither answering it falls back to GitHub", not is_zip and "github" in url)
+finally:
+    _release.set()
+    updater.probe_speed = _real_probe
+    updater.PROBE_GRACE_S = _real_grace
+
 print()
 print("RESULT:", "ALL OK" if failures == 0 else f"{failures} FAILURE(S)")
 sys.exit(1 if failures else 0)

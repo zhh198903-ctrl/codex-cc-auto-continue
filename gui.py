@@ -4746,7 +4746,11 @@ builds' improved defaults still win for everything you left alone.</p>
 from whichever of <b>two sources</b> answers faster: the GitHub release
 itself, or the download-site mirror. Both are probed at once with a few
 seconds' budget, the quicker one gets the transfer, and if it fails the other
-is tried before the update is called off.</p>
+is tried before the update is called off. A source that has not answered
+within that budget counts as unreachable and the other one is used. Until
+3.3.1 a source that stayed silent made the whole update fail with
+<i>futures unfinished</i>, even with the other source ready, and only a
+second click got it through.</p>
 <p>This is not only about speed. Either source alone can carry an update, so
 a link that cannot reach GitHub &mdash; which shows up in this tool's own log
 on ordinary evenings &mdash; no longer means no updates. The mirror publishes
