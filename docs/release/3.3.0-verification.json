@@ -1,0 +1,49 @@
+{
+  "version": "3.3.0",
+  "date": "2026-10-20",
+  "exe_sha256": "58cfbbfe68638d1887ab6cf2bf07abcdad6d6e6837c618e269fc7c367744d080",
+  "exe_bytes": 28029650,
+  "source_checks": {
+    "legacy_suites": 7,
+    "legacy_checks": 682,
+    "unittest": 174,
+    "pytest": 96,
+    "subtests": 19
+  },
+  "packaged_selftest_passed": true,
+  "claude_app_version_probed": "2.42304.2.0",
+  "real_claude_desktop_source_e2e": {
+    "target": "this Claude desktop Code session only, matched by title and transcript id",
+    "held_while_turn_running": true,
+    "after_finish_sent_once_confirmed_by_transcript": true,
+    "no_repeat_during_180s_observation": true
+  },
+  "installed_exe_verified": {
+    "path": "D:\\claude\\auto_continue\\dist\\Auto-Continue.exe",
+    "previous_backed_up_sha256": "ce39b4a0212c3bd09401400c6a1f79573c4715ca93a14a59f420d05dc96456c4",
+    "profile": "isolated settings, only Claude EXE monitoring on",
+    "title": "Auto-Continue v3.3.0",
+    "tabs": [
+      "Codex EXE",
+      "Codex CLI",
+      "Claude CLI",
+      "Claude EXE"
+    ],
+    "row_shows_running_then_sends": true,
+    "packaged_after_finish_sent_once_submission_confirmed": true,
+    "spent_run_saved": true,
+    "no_repeat_after_next_completed_turn": {
+      "idle_seconds_observed": 32,
+      "exe_after_finish_fires": 1,
+      "transcript_prompts_with_marker": 1
+    }
+  },
+  "not_covered": [
+    "permission prompts and questions are left to the user",
+    "model and effort are not changed in the desktop app",
+    "a real usage-limit or network error in the desktop app was not raised; classification is tested on real transcript records from this machine"
+  ],
+  "user_codex_windows_operated": false,
+  "claude_login_or_underlying_changes": false,
+  "control_bundle_modified": false
+}

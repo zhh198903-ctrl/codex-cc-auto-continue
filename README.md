@@ -1,5 +1,15 @@
 # Codex/CC Auto-Continue
 
+## Claude EXE: the Claude desktop app (3.3.0)
+
+A fourth monitor type, **off by default**, for Claude Code sessions in the Claude desktop app. It handles the session showing in each Claude window, the way Codex EXE does:
+
+- **Which session**: the page inside the window is titled `<session title> - Claude Code`, and Claude Code writes the same title into that session's history file under `%USERPROFILE%\.claude\projects`. Nothing is done until the title matches exactly one desktop session; same-titled sessions, split view or a missing history leave the window alone, with one log line saying why.
+- **What it reads**: running/idle and the prompt box from the window (UI Automation); usage limits, connection errors and turn completion from the history, where Claude Code flags its own API errors.
+- **What it does**: after a usage limit, `continue` at the reset time plus Buffer; after a connection error, `continue` every Retry interval up to Maximum retries; After finish once per completed turn within its Loops. Safeguard blocks, a model's own limit and login problems get nothing typed and show *Needs attention*.
+- **How it types**: writes into the prompt box and presses the app's Send button (no simulated keys), only with an empty box, no running turn and the same session still showing; a send counts once the history records the new prompt.
+- **Not yet**: permission prompts and questions are left to you; model and effort are not changed.
+
 ## Claude CLI simplified (3.2.0)
 
 Version 3.2.0 removes Claude CLI's **model recovery** — the opt-in script that switched a session blocked by safeguards to a fallback model, waited for it to finish, ran `/compact` and switched back, plus its quota switching and its steering of windows back to a target model. It typed far more than `continue` and depended on Claude Code's dialogs and status bar staying exactly as they were. A session blocked by safeguards, or out of its own model's allowance, now simply waits for you; **After finish** does not count it as finished, and the safeguard picker and the *Switch model?* dialog are never auto-answered. Anyone who had model recovery switched on is told once in the log; its stored settings are left unused.

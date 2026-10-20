@@ -2164,6 +2164,12 @@ class MainWindow(CodexGuiMixin, QMainWindow):
     sig_codex_app_skip = pyqtSignal(int)
     sig_codex_app_cooldown = pyqtSignal(int)
     sig_codex_app_bind = pyqtSignal(dict)
+    sig_claude_app_start = pyqtSignal()
+    sig_claude_app_stop = pyqtSignal()
+    sig_claude_app_config = pyqtSignal(dict)
+    sig_claude_app_fire = pyqtSignal(int)
+    sig_claude_app_skip = pyqtSignal(int)
+    sig_claude_app_cooldown = pyqtSignal(int)
     sig_set_interval = pyqtSignal(int)
     sig_set_buffer = pyqtSignal(int)
     sig_set_retry_interval = pyqtSignal(int)
@@ -3628,7 +3634,10 @@ class MainWindow(CodexGuiMixin, QMainWindow):
         # (The countdown column is repainted by its own 1s timer.)
         sig = (self._view_provider, [(r.get("provider", "claude"), r["hwnd"], r["title"], r["status"], r["reset_utc"],
                 r["last_sent_utc"], r["excluded"], r["model"], r["effort"],
-                r.get("tabs", 1), r.get("thread_id"), r.get("cwd"), r.get("record_only", False))
+                r.get("tabs", 1), r.get("thread_id"), r.get("cwd"), r.get("record_only", False),
+                # Claude EXE shows Running/Idle from this flag; other types
+                # leave it out so a turn boundary does not rebuild their rows.
+                r.get("running") if r.get("provider") == "claude_app" else None)
                for r in rows])
         if sig == self._last_render_sig:
             self._refresh_activity_times()
@@ -3751,7 +3760,7 @@ class MainWindow(CodexGuiMixin, QMainWindow):
             provider = row.get("provider", "claude")
             activity = bool(row.get("activity_row"))
             thread_id = row.get("thread_id", "")
-            is_codex = provider in ("codex", "codex_app")
+            is_codex = provider in ("codex", "codex_app", "claude_app")
             if is_codex:
                 codex_config = self._codex_row_config(row)
                 options = self._codex_row_options(row)
@@ -3759,7 +3768,8 @@ class MainWindow(CodexGuiMixin, QMainWindow):
                 # next Codex poll or changing the worker's snapshot object.
                 row = dict(row,
                     model=options["model"], effort=options["effort"], excluded=options["excluded"])
-            title_text = {"codex": "[Codex CLI] ", "codex_app": "[Codex EXE] "}.get(provider, "[Claude CLI] ") + row["title"]
+            title_text = {"codex": "[Codex CLI] ", "codex_app": "[Codex EXE] ",
+                          "claude_app": "[Claude EXE] "}.get(provider, "[Claude CLI] ") + row["title"]
             if activity:
                 title_text = "[Codex] " + row["title"]
                 if row.get("cwd"):
@@ -3777,7 +3787,11 @@ class MainWindow(CodexGuiMixin, QMainWindow):
                         f" background tabs' content.\nDrag each Claude tab"
                         f" out into its own window for full coverage.")
             title_item.setToolTip(tip)
-            if is_codex:
+            if provider == "claude_app":
+                title_item.setToolTip(tip + "\nThe session showing in this Claude window."
+                    + f"\nSession ID: {thread_id or 'not matched yet'}"
+                    + f"\nModel: {row.get('current_model', '') or 'unknown'}")
+            elif is_codex:
                 title_item.setToolTip(tip + "\nOnly the active tab is watched. Use a separate window per session."
                     + f"\nCurrent Codex: {row.get('current_model', '')} {row.get('current_effort', '')}")
             if activity:
@@ -3795,6 +3809,7 @@ class MainWindow(CodexGuiMixin, QMainWindow):
                 else "App retrying" if is_codex and row["status"] == "retry_busy"
                 else "Waiting for Send" if is_codex and row["status"] == "waiting_send"
                 else "Confirming submission" if is_codex and row["status"] == "confirming_send"
+                else "Running" if provider == "claude_app" and row["status"] == ST_IDLE and row.get("running")
                 else STATUS_LABEL.get(row["status"], row["status"])
             )
             bg = self._palette["status_bg"].get(row["status"])
@@ -3867,6 +3882,14 @@ class MainWindow(CodexGuiMixin, QMainWindow):
 
             model_combo.currentIndexChanged.connect(_model_picked)
             model_combo.lineEdit().editingFinished.connect(_model_picked)
+            if provider == "claude_app":
+                # Not switched in the desktop app by this tool; the cell shows
+                # the session's own model instead.
+                model_combo.blockSignals(True)
+                model_combo.setEditText(row.get("current_model", "") or "(app)")
+                model_combo.blockSignals(False)
+                model_combo.setEnabled(False)
+                model_combo.setToolTip("Claude EXE: the model is not changed by Auto-Continue. Shown: the session's current model.")
             self.table.setCellWidget(r, 5, model_combo)
 
             # Effort dropdown — sent as `/effort <level>` right before
@@ -3895,6 +3918,9 @@ class MainWindow(CodexGuiMixin, QMainWindow):
                 self._on_codex_override(t, "effort", cb.currentData(), cp, sid) if cx else
                 self._on_effort_changed(t, cb.currentData())
             )
+            if provider == "claude_app":
+                effort_combo.setEnabled(False)
+                effort_combo.setToolTip("Claude EXE: effort is not changed by Auto-Continue.")
             self.table.setCellWidget(r, 6, effort_combo)
 
             # Action buttons
@@ -3928,7 +3954,7 @@ class MainWindow(CodexGuiMixin, QMainWindow):
                 skip.triggered.connect(lambda _, rr=row: self._cli_action(rr, "skip"))
                 exclude = menu.addAction("Exclude session" if thread_id else "Exclude window")
                 exclude.triggered.connect(lambda _, rr=row: self._cli_action(rr, "exclude"))
-                if thread_id and not bound:
+                if thread_id and not bound and provider == "codex_app":
                     link = menu.addAction("Link visible Codex window")
                     link.setEnabled(self._cli_running["codex_app"] and len(self._codex_link_candidates(row)) == 1)
                     link.setToolTip("For identical titles: open this exact session first, then link its visible window to this session ID.")
@@ -4261,9 +4287,9 @@ class MainWindow(CodexGuiMixin, QMainWindow):
 # are not about to go browsing GitHub.
 HELP_HTML = """
 <h2>Auto-Continue v{version}</h2>
-<p>A watchdog for Claude CLI, Codex EXE (the desktop App), and Codex CLI.
-Select the types you want to monitor; each type has its own settings and
-driver. It detects stalled sessions and sends the configured continuation
+<p>A watchdog for Claude CLI, Claude EXE (the Claude desktop app), Codex EXE
+(the Codex desktop App), and Codex CLI. Select the types you want to monitor;
+each type has its own settings and driver. It detects stalled sessions and sends the configured continuation
 when the session is ready.</p>
 <p>It never invents work. Every keystroke it sends is either something you
 configured or the single word <code>continue</code>, and it only sends it
@@ -4271,8 +4297,8 @@ when the screen says the session is stuck.</p>
 
 <h3>Getting started</h3>
 <ol>
-<li>Switch between the <b>Codex EXE</b>, <b>Codex CLI</b> and <b>Claude CLI</b>
-tabs to view each type's settings and sessions. Enable <b>Monitor this type</b>
+<li>Switch between the <b>Codex EXE</b>, <b>Codex CLI</b>, <b>Claude CLI</b> and
+<b>Claude EXE</b> tabs to view each type's settings and sessions. Enable <b>Monitor this type</b>
 on the types you want to watch. Switching tabs preserves background monitoring.
 Poll, Buffer and Retry belong to each type separately. <b>App settings</b>
 holds shared start-up and keep-awake options; <b>More</b> holds Help,
@@ -4382,6 +4408,48 @@ wherever the prompt's cursor sits, even after the arrow keys have moved it
 off the first option. <b>Fire now</b> is your own instruction and is not
 held. Before 2.1.4, After finish in particular could answer a permission
 prompt you had left for yourself.</p>
+
+<h3>Claude EXE (the Claude desktop app)</h3>
+<p><b>Off by default.</b> Turn on <b>Monitor this type</b> on the Claude EXE tab.
+It watches Claude Code sessions in the Claude desktop app &mdash; the session
+showing in each Claude window, like Codex EXE does; sessions in the background
+are not touched.</p>
+<p><b>Which session it is looking at.</b> The window's title is always just
+"Claude", but the page inside it carries the session's title, and Claude Code
+records the same title in that session's own history file
+(<code>%USERPROFILE%\\.claude\\projects</code>). Nothing is done until that
+title matches exactly one desktop session. Two sessions with the same title,
+more than one session pane open in one window (split view), or no matching
+history: the window is left alone and the log says why, once. Renaming one of
+two same-named sessions is enough.</p>
+<p><b>What it reads where.</b> Whether a turn is running and whether the prompt
+box holds anything come from the window. Usage limits, connection errors and
+the end of a turn come from the session's history, where Claude Code marks its
+own API errors &mdash; so a session that only <i>talks about</i> an error is not
+mistaken for one stuck on it.</p>
+<p><b>What it does.</b></p>
+<ul>
+<li>A usage limit with a reset time: waits until that time plus <b>Buffer</b>,
+then sends <code>continue</code>. The desktop app may resume by itself at that
+moment ("continuing automatically at &hellip;"); the Buffer lets it go first,
+and a session that is already running again is left alone.</li>
+<li>A connection error: one <code>continue</code> every <b>Retry</b> interval,
+at most <b>Maximum retries</b> times (More settings).</li>
+<li><b>After finish</b>: that session's prompt, once per completed turn, for as
+many runs as its Loops allow.</li>
+<li>A safeguard block, a model's own weekly limit, or a login problem: nothing
+is typed &mdash; it cannot help &mdash; and the row shows <b>Needs
+attention</b>.</li>
+</ul>
+<p><b>How it types.</b> It writes the line into the prompt box and presses the
+app's own Send button: no simulated key presses, no clicking by screen
+position. It only does so while the box is empty, no turn is running and the
+window still shows the same session. A send counts once the session's history
+records the new prompt; if the Send button cannot be found, the text it wrote
+is removed again rather than left behind as a draft.</p>
+<p><b>Not done in this version.</b> Permission prompts and questions are left
+for you, and model and effort are not changed; the Model column shows the
+session's current model.</p>
 
 <h3>The table</h3>
 <p>The shared table shows sessions for the current tab. Recent Codex EXE sessions

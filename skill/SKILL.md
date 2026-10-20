@@ -8,6 +8,18 @@ description: 排查和配置 Auto-Continue —— Claude Code 在 Windows 上的
 Claude Code 的 Windows 看门狗：盯着「窗口停下来了」并替用户推下去。
 单文件免安装，MIT 开源、免费、可商用。
 
+### 3.3.0 Claude EXE（Claude 桌面版）
+
+新增第四种监测类型，**默认关闭**，在 Claude EXE 页签勾选「Monitor this type」开启。只处理每个 Claude 窗口里**当前显示**的那个 Code 会话：
+页面标题是「<会话标题> - Claude Code」，Claude Code 也把同一标题写进该会话的记录文件（`%USERPROFILE%\.claude\projects`），
+标题能唯一对上一个桌面会话才动手。重名、分屏开了多个会话、找不到记录时一律不动，日志写一次原因
+（`… is not acted on (another session has the same title; …)` 之类）。
+额度用完：等重置时间 + Buffer 后发 `continue`（桌面版自己也可能在那个时间续接，Buffer 让它先来）；
+连接出错：每个 Retry 间隔发一次，最多 Maximum retries 次；After finish：每个完成的回合一次。
+安全拦截、模型自己的额度、登录问题不打字，标为 Needs attention。
+打字方式是写进输入框再按应用自己的 Send 按钮，不模拟按键；会话记录里出现这条新提示才算发送成功，
+日志写 `Claude EXE #… : … submission confirmed`。权限提示和提问卡片留给用户；不改模型和推理强度。
+
 ### 3.2.0 Claude CLI 精简
 
 3.2.0 删除了 Claude CLI 的**模型恢复**（被安全拦截时切到备用模型、跑完 `/compact`

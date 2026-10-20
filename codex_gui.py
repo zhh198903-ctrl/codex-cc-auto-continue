@@ -7,6 +7,7 @@ from datetime import datetime
 from PyQt6.QtCore import Qt, QUrl
 from PyQt6.QtGui import QDesktopServices
 
+import claude_app
 import codex_app
 from cli_routing import claude_row_allowed
 
@@ -23,7 +24,10 @@ from watcher_ui import TIMING_FIELDS, settings_card, timing_spin
 MODEL_LEVELS = ["", "gpt-6.1-sol", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna",
                 "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5"]
 EFFORT_LEVELS = ["", "low", "medium", "high", "xhigh", "max", "ultra"]
-PROVIDER_LABELS = {"codex_app": "Codex EXE", "codex": "Codex CLI", "claude": "Claude CLI"}
+PROVIDER_LABELS = {"codex_app": "Codex EXE", "codex": "Codex CLI", "claude": "Claude CLI",
+                   "claude_app": "Claude EXE"}
+# Providers whose settings and row actions go through a CodexWatcher.
+WATCHED = ("codex", "codex_app", "claude_app")
 ACTIVITY_LABELS = {"running": "Running", "completed": "Completed", "interrupted": "Interrupted",
                    "quota": "Usage limit", "network": "Network error", "failed": "Failed", "unknown": "Unknown"}
 
@@ -31,11 +35,14 @@ ACTIVITY_LABELS = {"running": "Running", "completed": "Completed", "interrupted"
 class CodexGuiMixin:
     def _init_cli_gui(self):
         self._watch_targets = "claude"
-        self._cli_rows = {"claude": [], "codex": [], "codex_app": []}
-        self._cli_running = {"claude": False, "codex": False, "codex_app": False}
+        self._cli_rows = {"claude": [], "codex": [], "codex_app": [], "claude_app": []}
+        self._cli_running = {"claude": False, "codex": False, "codex_app": False, "claude_app": False}
         self._watch_requested = False
         self._codex_config = clean_config({})
         self._codex_app_config = clean_config({"poll": 2})
+        # Claude EXE is its own switch, off until the user turns it on.
+        self._claude_app_config = clean_config({"poll": 2})
+        self._claude_app_enabled = False
         self._codex_surfaces = "cli"
         self._view_provider = "claude"
         self._codex_recent_rows = []
@@ -45,7 +52,7 @@ class CodexGuiMixin:
     def _build_cli_controls(self, root):
         self.provider_tabs = QTabBar()
         self.provider_tabs.setExpanding(True)
-        for provider in ("codex_app", "codex", "claude"):
+        for provider in ("codex_app", "codex", "claude", "claude_app"):
             index = self.provider_tabs.addTab(PROVIDER_LABELS[provider])
             self.provider_tabs.setTabData(index, provider)
         self.provider_tabs.currentChanged.connect(self._on_provider_view)
@@ -67,7 +74,7 @@ class CodexGuiMixin:
             "Settings", {"poll": self.interval_spin, "buffer": self.buffer_spin,
                           "retry": self.retry_spin}, self.advanced_btn,
             enabled=self.target_checks["claude"])}
-        for provider, label in (("codex_app", "Codex EXE"), ("codex", "Codex CLI")):
+        for provider, label in (("codex_app", "Codex EXE"), ("codex", "Codex CLI"), ("claude_app", "Claude EXE")):
             config = self._codex_settings(provider)
             spins = {}
             for key, _label, _tip in TIMING_FIELDS:
@@ -83,6 +90,9 @@ class CodexGuiMixin:
             if provider == "codex_app":
                 self._codex_app_spins = spins
                 self.codex_app_settings_btn = advanced
+            elif provider == "claude_app":
+                self._claude_app_spins = spins
+                self.claude_app_settings_btn = advanced
             else:
                 self._codex_spins = spins
                 self.codex_settings_btn = advanced
@@ -165,6 +175,10 @@ class CodexGuiMixin:
             spin.blockSignals(True)
             spin.setValue(self._codex_app_config[key])
             spin.blockSignals(False)
+        for key, spin in self._claude_app_spins.items():
+            spin.blockSignals(True)
+            spin.setValue(self._claude_app_config[key])
+            spin.blockSignals(False)
         self.codex_recent_spin.blockSignals(True)
         self.codex_recent_spin.setValue(self._codex_app_config["recent_limit"])
         self.codex_recent_spin.blockSignals(False)
@@ -200,15 +214,28 @@ class CodexGuiMixin:
         self.codex_app_worker.log.connect(self._append_log)
         self.codex_app_worker.loops_spent.connect(lambda title, left: self._on_codex_loops_spent(title, left, "codex_app"))
         self.codex_app_worker.session_loops_spent.connect(self._on_codex_session_loops_spent)
+        self.claude_app_worker = CodexWatcher(claude_app, "claude_app", "Claude EXE")
+        self.claude_app_worker.moveToThread(self.worker_thread)
+        for action in ("start", "stop", "config", "fire", "skip", "cooldown"):
+            slot = {"config": "configure", "fire": "fire_now", "cooldown": "clear_cooldown"}.get(action, action)
+            getattr(self, "sig_claude_app_" + action).connect(getattr(self.claude_app_worker, slot))
+        self.claude_app_worker.snapshot.connect(self._on_claude_app_snapshot)
+        self.claude_app_worker.running_changed.connect(self._on_claude_app_running)
+        self.claude_app_worker.log.connect(self._append_log)
+        self.claude_app_worker.loops_spent.connect(lambda title, left: self._on_codex_loops_spent(title, left, "claude_app"))
+        self.claude_app_worker.session_loops_spent.connect(
+            lambda sid, left: self._on_codex_session_loops_spent(sid, left, "claude_app"))
 
     def _codex_settings(self, provider):
+        if provider == "claude_app":
+            return self._claude_app_config
         return self._codex_app_config if provider == "codex_app" else self._codex_config
 
     def _codex_row_config(self, row):
         return self._codex_settings(row.get("provider"))
 
     def _codex_row_options(self, row):
-        thread_id = row.get("thread_id", "") if row.get("provider") == "codex_app" else ""
+        thread_id = row.get("thread_id", "") if row.get("provider") in ("codex_app", "claude_app") else ""
         return session_options(self._codex_row_config(row), thread_id, row["title"])
 
     def _selected_clis(self):
@@ -218,12 +245,15 @@ class CodexGuiMixin:
                 selected.append("codex")
             if self._codex_surfaces in ("app", "all"):
                 selected.append("codex_app")
+        if self._claude_app_enabled:
+            selected.append("claude_app")
         return tuple(selected)
 
     def _on_target_selection(self, _checked):
         claude = self.target_checks["claude"].isChecked()
         cli = self.target_checks["codex"].isChecked()
         app = self.target_checks["codex_app"].isChecked()
+        self._claude_app_enabled = self.target_checks["claude_app"].isChecked()
         self._watch_targets = "both" if claude and (cli or app) else "claude" if claude else "codex" if cli or app else "none"
         if cli or app:
             self._codex_surfaces = "all" if cli and app else "cli" if cli else "app"
@@ -242,12 +272,14 @@ class CodexGuiMixin:
         (self.sig_claude_start if "claude" in selected else self.sig_claude_stop).emit()
         (self.sig_codex_start if "codex" in selected else self.sig_codex_stop).emit()
         (self.sig_codex_app_start if "codex_app" in selected else self.sig_codex_app_stop).emit()
+        (self.sig_claude_app_start if "claude_app" in selected else self.sig_claude_app_stop).emit()
 
     def _stop_watchers(self):
         self._watch_requested = False
         self.sig_claude_stop.emit()
         self.sig_codex_stop.emit()
         self.sig_codex_app_stop.emit()
+        self.sig_claude_app_stop.emit()
 
     def _on_claude_snapshot(self, rows):
         self._cli_rows["claude"] = [dict(r, provider="claude") for r in rows
@@ -271,6 +303,10 @@ class CodexGuiMixin:
 
     def _on_codex_app_snapshot(self, rows):
         self._cli_rows["codex_app"] = rows
+        self._merge_cli_rows()
+
+    def _on_claude_app_snapshot(self, rows):
+        self._cli_rows["claude_app"] = rows
         self._merge_cli_rows()
 
     def _merge_cli_rows(self):
@@ -312,6 +348,11 @@ class CodexGuiMixin:
         self._update_codex_recent_status()
         self._on_running_changed(any(self._cli_running.values()))
 
+    def _on_claude_app_running(self, running):
+        self._cli_running["claude_app"] = running
+        self._update_codex_recent_status()
+        self._on_running_changed(any(self._cli_running.values()))
+
     def _load_cli_settings(self):
         target = self.settings.value("watch_targets", "claude", type=str)
         self._watch_targets = target if target in ("claude", "codex", "both", "none") else "claude"
@@ -327,6 +368,12 @@ class CodexGuiMixin:
         except (ValueError, TypeError):
             app_raw = {"poll": 2}
         self._codex_app_config = clean_config(app_raw)
+        try:
+            claude_raw = json.loads(self.settings.value("claude_app_config", '{"poll":2}', type=str))
+        except (ValueError, TypeError):
+            claude_raw = {"poll": 2}
+        self._claude_app_config = clean_config(claude_raw)
+        self._claude_app_enabled = self.settings.value("claude_app_enabled", False, type=bool)
         self._sync_codex_controls()
         default_view = next((p for p in PROVIDER_LABELS if p in self._selected_clis()), "claude")
         view = self.settings.value("gui_view_provider", default_view, type=str)
@@ -338,6 +385,7 @@ class CodexGuiMixin:
         self._merge_cli_rows()
         self.sig_codex_config.emit(copy.deepcopy(self._codex_config))
         self.sig_codex_app_config.emit(copy.deepcopy(self._codex_app_config))
+        self.sig_claude_app_config.emit(copy.deepcopy(self._claude_app_config))
 
     def _save_cli_settings(self):
         self.settings.setValue("watch_targets", self._watch_targets)
@@ -345,28 +393,35 @@ class CodexGuiMixin:
         self.settings.setValue("codex_config", json.dumps(self._codex_config))
         self.settings.setValue("codex_surfaces", self._codex_surfaces)
         self.settings.setValue("codex_app_config", json.dumps(self._codex_app_config))
+        self.settings.setValue("claude_app_config", json.dumps(self._claude_app_config))
+        self.settings.setValue("claude_app_enabled", self._claude_app_enabled)
 
     def _apply_codex_config(self):
         self._codex_config = clean_config(self._codex_config)
         self._codex_app_config = clean_config(self._codex_app_config)
+        self._claude_app_config = clean_config(self._claude_app_config)
         self._sync_codex_controls()
         self.sig_codex_config.emit(copy.deepcopy(self._codex_config))
         self.sig_codex_app_config.emit(copy.deepcopy(self._codex_app_config))
+        self.sig_claude_app_config.emit(copy.deepcopy(self._claude_app_config))
         # Codex changes write only Codex keys; no Claude settings are saved.
         self._save_cli_settings()
         self._last_render_sig = None
         self._render_table()
 
     def _open_codex_settings(self, provider="codex"):
-        provider = "codex_app" if provider == "codex_app" else "codex"
+        provider = provider if provider in ("codex_app", "claude_app") else "codex"
         config = self._codex_settings(provider)
-        label = "Codex EXE" if provider == "codex_app" else "Codex CLI"
+        label = PROVIDER_LABELS[provider]
         dlg = QDialog(self)
         dlg.setWindowTitle(label + " — More settings")
         dlg.setMinimumWidth(420)
         dlg.resize(460, 260)
         layout = QVBoxLayout(dlg)
-        hint = QLabel("Only Codex sessions are monitored. ChatGPT and ChatGPT Work conversations are excluded. Per-session settings apply when that session is visible in an App window." if provider == "codex_app" else "These settings apply only to Codex CLI. Use a separate Windows Terminal window for each session.")
+        hint = QLabel({
+            "codex_app": "Only Codex sessions are monitored. ChatGPT and ChatGPT Work conversations are excluded. Per-session settings apply when that session is visible in an App window.",
+            "claude_app": "Claude Code sessions in the Claude desktop app. Only the session showing in a window is acted on, and only after its title matches exactly one session record. See Help.",
+        }.get(provider, "These settings apply only to Codex CLI. Use a separate Windows Terminal window for each session."))
         hint.setWordWrap(True)
         layout.addWidget(hint)
         form = QFormLayout()
@@ -379,7 +434,7 @@ class CodexGuiMixin:
             form.addRow(field_label, spin)
         layout.addLayout(form)
         permissions = auto_approve = None
-        if provider == "codex" or hasattr(codex_app, "apply_session_permissions"):
+        if provider == "codex" or (provider == "codex_app" and hasattr(codex_app, "apply_session_permissions")):
             permissions = QComboBox()
             permissions.setObjectName("codex_permission_mode")
             for text, value in (("Full access (default)", "full-access"), ("Approve for me", "approve-for-me"), ("Ask for approval", "ask-for-approval")):
@@ -390,7 +445,10 @@ class CodexGuiMixin:
             auto_approve.setObjectName("codex_auto_approve")
             auto_approve.setChecked(config["auto_approve"])
             form.addRow(auto_approve)
-        note = QLabel("Model / Effort, Exclude and After finish are set per Codex session in the table. Background session settings are applied when that session is bound to a visible window. Permission dialogs wait for your input." if provider == "codex_app" and permissions is None else "Permissions are applied before continuation. Automatic approval handles tool permission requests; other menus wait for your input. Model / Effort, Exclude and After finish are set in the table.")
+        note = QLabel(
+            "Exclude and After finish are set per session in the table. Permission prompts and questions wait for your input; model and effort are not changed." if provider == "claude_app"
+            else "Model / Effort, Exclude and After finish are set per Codex session in the table. Background session settings are applied when that session is bound to a visible window. Permission dialogs wait for your input." if provider == "codex_app" and permissions is None
+            else "Permissions are applied before continuation. Automatic approval handles tool permission requests; other menus wait for your input. Model / Effort, Exclude and After finish are set in the table.")
         note.setWordWrap(True)
         layout.addWidget(note)
         reset = QPushButton("Reset " + label + " settings…")
@@ -399,6 +457,8 @@ class CodexGuiMixin:
                 return
             if provider == "codex_app":
                 self._codex_app_config = clean_config({"poll": 2})
+            elif provider == "claude_app":
+                self._claude_app_config = clean_config({"poll": 2})
             else:
                 self._codex_config = clean_config({})
             self._apply_codex_config()
@@ -420,23 +480,23 @@ class CodexGuiMixin:
             self.codex_service.native_cli_action.emit(dict(target_id="codex:"+row["thread_id"], action=action))
             return
         provider = row.get("provider")
-        codex = provider in ("codex", "codex_app")
+        codex = provider in WATCHED
         thread_id = row.get("thread_id", "")
-        if action == "link" and thread_id:
+        if action == "link" and thread_id and provider == "codex_app":
             candidates = self._codex_link_candidates(row)
             if self._cli_running["codex_app"] and len(candidates) == 1:
                 native = candidates[0]
                 self.sig_codex_app_bind.emit(dict(thread_id=thread_id, hwnd=native["hwnd"],
                                                 identity=native["identity"], thread_hint=native["thread_hint"]))
             return
-        if action == "open" and thread_id:
+        if action == "open" and thread_id and provider == "codex_app":
             try:
                 ident = str(uuid.UUID(thread_id))
             except (ValueError, TypeError, AttributeError):
                 return
             QDesktopServices.openUrl(QUrl("codex://threads/" + ident))
             return
-        prefix = "sig_codex_app_" if provider == "codex_app" else "sig_codex_"
+        prefix = {"codex_app": "sig_codex_app_", "claude_app": "sig_claude_app_"}.get(provider, "sig_codex_")
         if action in ("fire", "skip", "cooldown") and (row.get("hwnd") is None or row.get("record_only")):
             return  # Configuration is editable; input requires a bound window.
         if action == "fire":
@@ -489,8 +549,8 @@ class CodexGuiMixin:
         self._last_render_sig = None
         self._render_table()
 
-    def _on_codex_session_loops_spent(self, thread_id, left):
-        self._codex_app_config["sessions"].setdefault(thread_id, {})["loops"] = left
+    def _on_codex_session_loops_spent(self, thread_id, left, provider="codex_app"):
+        self._codex_settings(provider)["sessions"].setdefault(thread_id, {})["loops"] = left
         self._save_cli_settings()
         self._last_render_sig = None
         self._render_table()
@@ -499,7 +559,7 @@ class CodexGuiMixin:
         config = self._codex_settings(provider)
         options = session_options(config, thread_id, title)
         dlg = QDialog(self)
-        dlg.setWindowTitle(("Codex App" if provider == "codex_app" else "Codex CLI") + " — After finish")
+        dlg.setWindowTitle(PROVIDER_LABELS.get(provider, "Codex CLI") + " — After finish")
         layout = QVBoxLayout(dlg)
         hint = QLabel(f"Prompt for {title!r} after a completed turn sits idle. Empty = off. Use one line.")
         hint.setWordWrap(True)
@@ -518,7 +578,7 @@ class CodexGuiMixin:
         def accept():
             prompt = edit.toPlainText().strip()
             if "\n" in prompt or "\r" in prompt:
-                QMessageBox.warning(dlg, "Codex prompt", "Use a single-line prompt.")
+                QMessageBox.warning(dlg, PROVIDER_LABELS.get(provider, "Codex") + " prompt", "Use a single-line prompt.")
                 return
             active = self._codex_settings(provider)
             current = session_options(active, thread_id, title)

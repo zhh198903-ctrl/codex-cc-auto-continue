@@ -56,7 +56,9 @@ class CodexGuiChecks(unittest.TestCase):
         # Exercise only dispatch boundaries; do not start Claude or live UIA.
         for signal in (self.window.sig_claude_start, self.window.sig_claude_stop,
                        self.window.sig_codex_start, self.window.sig_codex_stop,
-                       self.window.sig_codex_app_start, self.window.sig_codex_app_stop):
+                       self.window.sig_codex_app_start, self.window.sig_codex_app_stop,
+                       self.window.sig_claude_app_start, self.window.sig_claude_app_stop,
+                       self.window.sig_claude_app_fire):
             signal.disconnect()
         self.addCleanup(self.close_window)
 
@@ -70,6 +72,59 @@ class CodexGuiChecks(unittest.TestCase):
         if providers:
             self.window._set_provider_view(providers[0])
         self.app.processEvents()
+
+    def _claude_exe_row(self, **kw):
+        row = dict(provider="claude_app", hwnd=55, title="Fix build", thread_id="sid-1", status="idle",
+                   reset_utc=None, last_sent_utc=None, excluded=False, model="", effort="",
+                   current_model="Opus 5.5", identity="sid-1", running=False)
+        row.update(kw)
+        return row
+
+    def test_claude_exe_is_a_fourth_type_and_ships_off(self):
+        tabs = [self.window.provider_tabs.tabText(i) for i in range(self.window.provider_tabs.count())]
+        self.assertEqual(tabs, ["Codex EXE", "Codex CLI", "Claude CLI", "Claude EXE"])
+        self.assertFalse(self.window.target_checks["claude_app"].isChecked())
+        self.assertNotIn("claude_app", self.window._selected_clis())
+
+    def test_claude_exe_switch_persists_and_dispatches(self):
+        seen = []
+        self.window.sig_claude_app_start.connect(lambda: seen.append("start"))
+        self.window.sig_claude_app_stop.connect(lambda: seen.append("stop"))
+        self.window._watch_targets = "claude"
+        self.window._start_selected_watchers()
+        self.assertEqual(seen, ["stop"])
+        self.window.target_checks["claude_app"].setChecked(True)
+        self.assertTrue(self.store.value("claude_app_enabled", type=bool))
+        self.assertEqual(self.window._watch_targets, "claude")      # the other switches are untouched
+        seen.clear()
+        self.window._start_selected_watchers()
+        self.assertEqual(seen, ["start"])
+        self.window._stop_watchers()
+        self.assertEqual(seen[-1], "stop")
+
+    def test_claude_exe_rows_keep_their_own_settings_and_actions(self):
+        emitted = []
+        self.window.sig_claude_app_fire.connect(lambda h: emitted.append(("claude_app", h)))
+        self.window.sig_codex_app_fire.disconnect()
+        self.window.sig_codex_app_fire.connect(lambda h: emitted.append(("codex_app", h)))
+        self.window.sig_fire_now.connect(lambda h: emitted.append(("claude", h)))
+        row = self._claude_exe_row()
+        self.window._cli_action(row, "fire")
+        self.assertEqual(emitted, [("claude_app", 55)])
+        self.window._cli_action(row, "exclude")
+        self.assertTrue(self.window._claude_app_config["sessions"]["sid-1"]["excluded"])
+        self.assertEqual(self.window._codex_app_config["sessions"], {})
+        self.assertTrue(json.loads(self.store.value("claude_app_config"))["sessions"]["sid-1"]["excluded"])
+
+    def test_claude_exe_row_shows_model_but_cannot_change_it(self):
+        self.select("claude_app")
+        self.window._on_claude_app_snapshot([self._claude_exe_row()])
+        self.assertTrue(self.window.table.item(0, 0).text().startswith("[Claude EXE] Fix build"))
+        self.assertFalse(self.window.table.cellWidget(0, 5).isEnabled())
+        self.assertFalse(self.window.table.cellWidget(0, 6).isEnabled())
+        self.assertEqual(self.window.table.item(0, 1).text(), "Idle")
+        self.window._on_claude_app_snapshot([self._claude_exe_row(running=True)])
+        self.assertEqual(self.window.table.item(0, 1).text(), "Running")
 
     def test_modes_dispatch_only_selected_drivers(self):
         seen = []

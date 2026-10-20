@@ -85,6 +85,15 @@ class State:
     continued_text: str = ""
 
 
+_HOLD_TEXT = {
+    "same_title": "another session has the same title; rename one of them",
+    "no_transcript": "its session record was not found",
+    "panes": "more than one session pane is open in this window",
+    "no_prompt_box": "no prompt box is showing",
+    "no_toolbar": "the prompt box could not be read",
+}
+
+
 class CodexWatcher(QObject):
     snapshot = pyqtSignal(list)
     recent_snapshot = pyqtSignal(list, str)
@@ -98,6 +107,11 @@ class CodexWatcher(QObject):
         self.driver = driver or cli
         self.provider = provider
         self.label = label
+        # Log lines name the type, so a Claude EXE line never reads as Codex.
+        self.tag = "Claude EXE" if provider == "claude_app" else "Codex"
+        # Desktop drivers keep one state per conversation, not per window.
+        self.desktop = provider in ("codex_app", "claude_app")
+        self._hold_logged = {}
         self.config = clean_config({})
         self.states: dict[int, State] = {}
         self.session_bindings = {}
@@ -190,8 +204,8 @@ class CodexWatcher(QObject):
         st.status = "sent"
         dry_run=self.config['dry_run'] and not action.startswith('companion')
         prefix = "[dry-run] " if dry_run else ""
-        confirmation = "; submission confirmed" if self.provider == "codex_app" and not dry_run else ""
-        self.log.emit("fire", f"{prefix}Codex #{st.hwnd:x}: {reason}{confirmation}")
+        confirmation = "; submission confirmed" if self.desktop and not dry_run else ""
+        self.log.emit("fire", f"{prefix}{self.tag} #{st.hwnd:x}: {reason}{confirmation}")
         st.seen_running = False
         st.idle_since = None
         service = getattr(self, "control_service", None)
@@ -243,7 +257,7 @@ class CodexWatcher(QObject):
         self._publish()
 
     def _send(self, st, window, text, now, reason, action="") -> bool:
-        if (self.provider == 'codex_app' and st.thread_id and
+        if (self.desktop and st.thread_id and
                 self.primary_windows.get(st.thread_id, st.hwnd) != st.hwnd):
             return False
         if st.submission is not None:
@@ -265,23 +279,23 @@ class CodexWatcher(QObject):
         owned_window = bool(service and self.provider == 'codex_app' and service.native_window_owned(st.hwnd))
         if permissions and not dry_run and not (service and (service.owns(st.thread_id,self.provider) or owned_window)):
             if not permissions(window, self.config["permission_mode"]):
-                self.log.emit("warn", f"Codex #{st.hwnd:x}: permissions could not be applied; continue held")
+                self.log.emit("warn", f"{self.tag} #{st.hwnd:x}: permissions could not be applied; continue held")
                 return False
         model, effort = options["model"], options["effort"]
         if (model or effort) and not dry_run:
             if not self.driver.apply_session_options(window, model, effort):
-                self.log.emit("warn", f"Codex #{st.hwnd:x}: session model / effort could not be applied; continue held")
+                self.log.emit("warn", f"{self.tag} #{st.hwnd:x}: session model / effort could not be applied; continue held")
                 return False
         outcome = self.driver.send_prompt(window, text, dry_run=dry_run)
         if getattr(outcome, "submission", None) is not None:
             st.submission = outcome.submission
             st.submit_reason, st.submit_action = reason, action
             st.status = outcome.status
-            self.log.emit("info", f"Codex #{st.hwnd:x}: own prompt staged; waiting for native Send and submission confirmation")
+            self.log.emit("info", f"{self.tag} #{st.hwnd:x}: own prompt staged; waiting for native Send and submission confirmation")
             return False
         if not outcome:
             detail = getattr(outcome, 'detail', '') or 'draft, menu, running, unreadable, or focus'
-            self.log.emit("warn", f"Codex #{st.hwnd:x}: {reason} held ({detail})")
+            self.log.emit("warn", f"{self.tag} #{st.hwnd:x}: {reason} held ({detail})")
             return False
         # Permission/model pickers can take several seconds. Cooldown starts
         # after actual submission, rather than before those native actions.
@@ -299,7 +313,7 @@ class CodexWatcher(QObject):
         try:
             handles = self.driver.terminal_handles()
         except Exception as exc:
-            self.log.emit("warn", f"Codex enumeration failed: {type(exc).__name__}")
+            self.log.emit("warn", f"{self.tag} enumeration failed: {type(exc).__name__}")
             return
         for hwnd in handles:
             seen.add(hwnd)
@@ -321,9 +335,9 @@ class CodexWatcher(QObject):
                     self.states.pop(hwnd, None)
                     self.session_bindings.pop(hwnd, None)
                     continue
-                title = window.Name or f"Codex #{hwnd:x}"
+                title = window.Name or f"{self.tag} #{hwnd:x}"
                 identity = self.driver.session_key(window, text) if hasattr(self.driver, "session_key") else ""
-                if self.provider == 'codex_app' and not identity:
+                if self.desktop and not identity:
                     # React can temporarily unmount the native composer. That
                     # is unreadable state, not proof of a different chat.
                     # Preserve the exact pending receipt and continuation arm;
@@ -332,8 +346,16 @@ class CodexWatcher(QObject):
                     if st is not None:
                         st.blind = True
                         st.status = 'unknown'
+                    hold = getattr(text, 'hold', '')
+                    if hold and self._hold_logged.get(hwnd) != (title, hold):
+                        # Once per window and reason: say why nothing is done.
+                        self._hold_logged[hwnd] = (title, hold)
+                        self.log.emit("warn", f"{self.tag} #{hwnd:x}: {title!r} is not acted on ({_HOLD_TEXT.get(hold, hold)})")
                     continue
+                self._hold_logged.pop(hwnd, None)
                 thread_id = self.activities.thread_id_for_title(title) if self.activities is not None else ""
+                if self.provider == "claude_app":
+                    thread_id = identity
                 thread_hint = getattr(text, "thread_hint", "")
                 binding = self.session_bindings.get(hwnd)
                 if binding:
@@ -352,14 +374,14 @@ class CodexWatcher(QObject):
                 st.title, st.screen, st.read_at, st.blind = title, screen, now, False
                 observed.append((st, window))
             except Exception as exc:
-                self.log.emit("warn", f"Codex #{hwnd:x}: {type(exc).__name__}: {exc}")
-        if self.provider == 'codex_app':
+                self.log.emit("warn", f"{self.tag} #{hwnd:x}: {type(exc).__name__}: {exc}")
+        if self.desktop:
             observed = self._one_window_per_thread(observed)
         for st, window in observed:
             try:
                 self._observe(st, window, now)
             except Exception as exc:
-                self.log.emit('warn', f'Codex #{st.hwnd:x}: {type(exc).__name__}: {exc}')
+                self.log.emit('warn', f'{self.tag} #{st.hwnd:x}: {type(exc).__name__}: {exc}')
         for hwnd in list(self.states):
             if hwnd not in seen and not self.driver.window_exists(hwnd):
                 self.states.pop(hwnd, None)
@@ -443,7 +465,7 @@ class CodexWatcher(QObject):
                 approve = getattr(self.driver, "approve_permission", None)
                 if approve and approve(window):
                     st.status = "approved"
-                    self.log.emit("info", f"Codex #{st.hwnd:x}: native permission request approved once")
+                    self.log.emit("info", f"{self.tag} #{st.hwnd:x}: native permission request approved once")
                     return
             st.status = "prompt"
             st.idle_since = None
@@ -478,7 +500,7 @@ class CodexWatcher(QObject):
             st.status = "quota_busy" if screen.error_kind in ("quota", "quota_retry") else "retry_busy" if screen.error_kind == "network" else "idle"
             if screen.error_kind and screen.error_id != st.last_error:
                 st.last_error = screen.error_id
-                self.log.emit("warn", f"Codex #{st.hwnd:x}: {screen.error_kind}; App is retrying; automatic input held")
+                self.log.emit("warn", f"{self.tag} #{st.hwnd:x}: {screen.error_kind}; App is retrying; automatic input held")
             return
         if screen.blocked or screen.draft or not screen.ready:
             st.status = "prompt" if screen.blocked else "held"
@@ -488,7 +510,7 @@ class CodexWatcher(QObject):
             st.idle_since = None
             st.seen_running = False
             if screen.error_id != st.last_error:
-                self.log.emit("warn", f"Codex #{st.hwnd:x}: {screen.error_kind}" +
+                self.log.emit("warn", f"{self.tag} #{st.hwnd:x}: {screen.error_kind}" +
                               (f"; reset {screen.reset_utc.isoformat()}" if screen.reset_utc else ""))
                 st.last_error = screen.error_id
             if screen.error_kind == "quota":
@@ -551,7 +573,7 @@ class CodexWatcher(QObject):
     def _publish(self):
         rows = []
         states = list(self.states.values())
-        if self.provider == 'codex_app':
+        if self.desktop:
             groups = {}
             for st in states:
                 if st.thread_id:
@@ -570,7 +592,7 @@ class CodexWatcher(QObject):
                          "thread_id": st.thread_id,
                          "identity": st.identity, "thread_hint": st.thread_hint,
                          "current_model": s.model, "current_effort": s.effort,
-                         "tabs": len(groups[st.thread_id]) if self.provider == 'codex_app' and st.thread_id else 1,
+                         "tabs": len(groups[st.thread_id]) if self.desktop and st.thread_id else 1,
                          "excluded": options["excluded"],
                          "title_key": st.title, "running": s.running,
                          "prompt": {"kind": "codex_menu"} if s.blocked else None,

@@ -27,7 +27,7 @@ jobs:
           python test_updater.py
           python test_singleinstance.py
       - name: Codex checks
-        run: python -m unittest test_cli_routing test_codex_activity test_codex_cli test_codex_gui test_codex_app test_codex_sessions test_codex_submission -v
+        run: python -m unittest test_cli_routing test_codex_activity test_codex_cli test_codex_gui test_codex_app test_codex_sessions test_codex_submission test_claude_app -v
 
       - name: Control integration checks
         run: python -m pytest test_control_recent.py test_control_worker_scheduling.py test_native_control_choice_commit.py test_native_control_focus.py test_native_control_question_focus.py test_native_control_stop_focus.py test_codex_app_question_coexist.py test_codex_app_read_snapshot.py test_codex_context_fidelity.py test_codex_local_context.py test_codex_multiwindow.py test_codex_submission_context.py -q
