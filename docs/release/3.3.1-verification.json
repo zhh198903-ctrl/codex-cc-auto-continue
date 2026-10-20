@@ -38,5 +38,43 @@
   },
   "user_codex_windows_operated": false,
   "claude_login_or_underlying_changes": false,
-  "control_bundle_modified": false
+  "control_bundle_modified": false,
+  "public_download_verification": {
+    "version": "3.3.1",
+    "github_release": "https://github.com/zhh198903-ctrl/codex-cc-auto-continue/releases/tag/v3.3.1",
+    "source_commit": "30becc81d417242daa06c42caa59dbfd877194ad",
+    "exe_sha256": "7c59c91ce1c153d21844853229a60b2a4f95db130709c32f162df7096481a300",
+    "exe_bytes": 28029426,
+    "packages": {
+      "Auto-Continue_dist_v3_3_1.zip": {
+        "bytes": 27700403,
+        "sha256": "91d550d096a8c5c1466dda2edc9d155c99bbe967f7ab5a303064a3e89d19b59b"
+      },
+      "Auto-Continue-Skill_dist_v3_3_1.zip": {
+        "bytes": 10499,
+        "sha256": "6ce42d74b9db38816aa96ddbffae1fbc33318b0c7cded8ebfca241d852d4de38"
+      }
+    },
+    "github_and_zip_exe_match_local": true,
+    "public_download_verified": true,
+    "http_range_verified": true,
+    "other_homepage_content_identical": true,
+    "server_versions_retained": [
+      "3.3.1",
+      "3.3.0",
+      "3.2.0",
+      "3.1.2",
+      "3.1.1"
+    ]
+  },
+  "public_legacy_client_upgrade": {
+    "original_version": "3.3.0",
+    "updated_version": "3.3.1",
+    "attempts": 1,
+    "source": "github unreachable, mirror chosen",
+    "automatic_restart_passed": true,
+    "settings_preserved": true,
+    "monitors_remained_stopped": true,
+    "previous_exe_kept_as_bak": true
+  }
 }

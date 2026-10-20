@@ -11,3 +11,5 @@ Completed checks:
 - Claude EXE behavior is unchanged from 3.3.0, whose real-session checks are recorded in `auto-continue-3.3.0.md`.
 
 User Codex windows were not operated. No Claude login or underlying Claude change was made. EXE SHA-256: `7c59c91ce1c153d21844853229a60b2a4f95db130709c32f162df7096481a300`.
+
+Public acceptance: GitHub release v3.3.1 is Latest with the local EXE as its asset; the download site serves both 3.3.1 packages (size, SHA-256, ZIP CRC and HTTP 206 checked over the public link), only the Auto-Continue card changed, and the server keeps 3.3.1, 3.3.0, 3.2.0, 3.1.2 and 3.1.1. The unmodified published 3.3.0 client found 3.3.1, chose the mirror (GitHub did not answer), verified, replaced itself and reopened as 3.3.1 on the first attempt, with settings kept, monitors off and the previous EXE kept as `.bak`.
