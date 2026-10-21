@@ -104,6 +104,21 @@
     }
   },
   "changelog": {
+    "3.3.2": {
+      "date": "2026-10-21",
+      "items": [
+        {
+          "t": "fix",
+          "zh": "Claude CLI：回合结束后输入框里的灰色提示建议不再被当成草稿，额度续接、完成后续接和配套程序的发送不再因此被拦下。",
+          "en": "Claude CLI: the dim prompt suggestion Claude Code shows in the input box after a turn no longer counts as a draft, so limit resumes, After finish prompts and companion sends are no longer held by it."
+        },
+        {
+          "t": "fix",
+          "zh": "Claude CLI：输入改为分段进行，在屏幕上看到整行到达后才按回车，回车生效后才切回原窗口；修复长句末尾几个字和回车落到别的窗口、却仍显示发送成功的问题。",
+          "en": "Claude CLI: typing goes in short pieces, Enter is pressed only once the whole line shows in the input box, and the previous window comes back only after Enter took it; fixes the end of a long line and its Enter landing in another window while the send still reported success."
+        }
+      ]
+    },
     "3.3.1": {
       "date": "2026-10-20",
       "items": [
@@ -156,26 +171,6 @@
           "t": "improve",
           "zh": "保留独立 EXE 的一键升级、中文及特殊字符目录支持、原 EXE 备份和设置及监测开关恢复。Control 继续使用内置副本。",
           "en": "Retains one-action standalone EXE updates, Unicode and special-character folder support, EXE backup, and settings and monitor switch restoration. Control continues using its built-in copy."
-        }
-      ]
-    },
-    "3.1.1": {
-      "date": "2026-10-18",
-      "items": [
-        {
-          "t": "fix",
-          "zh": "修复独立 EXE 位于中文、空格或特殊字符目录时，下载完成后无法替换或重启的问题。",
-          "en": "Fixes standalone EXE replacement and restart in folders containing Unicode, spaces or special characters."
-        },
-        {
-          "t": "improve",
-          "zh": "Update now 一次完成下载、校验、替换和重启，保留设置与三个监测开关，并备份原 EXE。",
-          "en": "Update now completes download, verification, replacement and restart in one action, retaining settings and all three monitor switches and backing up the previous EXE."
-        },
-        {
-          "t": "fix",
-          "zh": "下载校验失败时自动尝试另一下载源；替换失败会重新打开原版本并记录原因。Control 继续使用其内置副本。",
-          "en": "A failed download integrity check tries the other source; a failed replacement reopens the previous version and records the reason. Control continues using its built-in copy."
         }
       ]
     }

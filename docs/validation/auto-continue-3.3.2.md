@@ -1,0 +1,18 @@
+# Auto-Continue 3.3.2 verification
+
+Date: 2026-10-21. Scope: two Claude CLI fixes reported by the Codex Claude Control session. Control keeps its built-in engine and is not modified or published here.
+
+1. **Prompt suggestion taken for a draft.** After a turn, Claude Code 2.1.283 can show a suggested next prompt in the input box. As plain text it looks like a draft, so every send was held, and Control got `draft` for a box nobody had typed in. Measured on a live session in Windows Terminal (ccdebug probe), the suggestion's characters are dimmed relative to the box's glyph (0x666666 against 0xCCCCCC), with the caret right after the glyph. Typed text has the glyph's colour, with the caret at its end or wherever it was moved. Enter on an empty box with a suggestion showing sent nothing (transcript unchanged). The reader now treats dim text with the caret in front of it as an empty box; anything unreadable stays a draft. Claude Code's suggestion setting was not changed.
+2. **Long send lost its tail.** Keys reach whichever window is in front when Windows processes them. The previous window was put back in front right after typing, and the end of a 216-character line and its Enter went elsewhere while the API answered `ok`. Each line is now typed in pieces behind a foreground check. Enter is pressed only once the whole line shows in the input box, and the foreground is handed back only after Enter took the line out. Failures answer `focus_lost` or `not_confirmed`.
+
+Found while verifying: Windows Terminal's FindText returns a range one character past the match. The first version of the fix used that range end and missed the live suggestion. Positions are now counted from the line start, and the test fake reproduces the overshoot; the earlier code fails against it.
+
+Completed checks:
+
+- Source: seven legacy suites (705 checks, 19 new), 174 unittest cases, 96 pytest cases and 19 subtests passed. Each new guard was removed in turn (blanking, caret check, colour check, the wait before Enter, the wait after Enter, the per-piece foreground check, and the FindText range end), and a check failed each time.
+- Source on the real CLI: a 205-character line typed through the new path arrived in the transcript exactly. In a real Windows Terminal window drawing the same styles, the reader returned an empty box for a dim suggestion with the caret before it, and a draft for normal text (caret at end, caret at start) and for dim text with the caret at its end.
+- Packaged `--selftest` passed. The installed EXE (`dist/Auto-Continue.exe`, 3.3.1 backed up first) ran with an isolated profile. Limit and network triggers matched only a test marker, answering was off, and After finish was set for the probe only. Results: title v3.3.2. Through the local API, a suggestion-styled box read empty and its send was not refused as draft (it answered `not_confirmed`, since that window does not echo typing). A normal-text box was refused as `draft`. A 337-character send to the probe answered `ok` and arrived exactly. The EXE's own 220-character After finish arrived exactly, once (Loops 1). Poll changed from 5 to 6 in the window, was saved, and was kept after a restart.
+
+Not verified: the fixed reader against a live Claude Code suggestion (source or packaged). While unused, suggestions appear only every tenth eligible turn and only while the terminal has focus, and another program kept taking the foreground, so none appeared again after the fix. The live suggestion's colours and caret were measured before the fix; the fixed reader was checked on drawn terminal states with the same escape codes and caret placement.
+
+User Codex windows were not operated. No Claude login, underlying Claude change or Claude Code setting change was made.

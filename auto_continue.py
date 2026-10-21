@@ -42,7 +42,7 @@ import uiautomation as auto
 # A "-dev" suffix does not help: parse_version() strips it, so 1.0.17-dev and
 # 1.0.17 compare equal. Leave this at the LAST RELEASED version while
 # developing; release.yml refuses to publish if it disagrees with the tag.
-APP_VERSION = "3.3.1"
+APP_VERSION = "3.3.2"
 
 
 # ---------------------------------------------------------------------------
@@ -444,6 +444,9 @@ def read_terminal_text(window_ctrl) -> str | None:
     10k-line history) over cross-process COM every tick for every window.
     Falls back to the full-document read if the provider rejects the range
     surgery. `waitTime=0` skips uiautomation's default 0.5s post-op sleep.
+
+    A prompt suggestion is left out of the input box: it is not something
+    anyone typed (see `_suggestion_line`).
     """
     term = find_termcontrol(window_ctrl)
     if term is None:
@@ -464,12 +467,120 @@ def read_terminal_text(window_ctrl) -> str | None:
             )
             text = tr.GetText(-1)
             if text:
-                return text
+                return _without_suggestion(text, tp, tr)
         except Exception:
             pass
-        return tp.DocumentRange.GetText(-1)
+        doc = tp.DocumentRange
+        return _without_suggestion(doc.GetText(-1), tp, doc)
     except Exception:
         return None
+
+
+# UIA_ForegroundColorAttributeId: a run's text colour as a COLORREF, or a
+# "mixed" marker object when the range holds more than one colour.
+_UIA_FOREGROUND_COLOR = 40008
+
+
+def _uia_color(rng):
+    """The one foreground colour of `rng`, or None (mixed, unsupported)."""
+    try:
+        value = rng.GetAttributeValue(_UIA_FOREGROUND_COLOR)
+    except Exception:
+        return None
+    # Mixed and not-supported come back as COM marker objects, not numbers.
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    return None
+
+
+def _suggestion_line(tp, rng):
+    """The input box's line when what it shows is Claude Code's prompt
+    suggestion, not typed text; otherwise None.
+
+    After a turn Claude Code may offer a next prompt, drawn IN the input box
+    (Tab takes it, typing replaces it, Enter on the empty box sends nothing —
+    checked live). As text it reads exactly like a draft, and a draft holds
+    every send: a companion was refused with reason=draft for a box nobody
+    had typed in (2026-10-21). Measured on Claude Code 2.1.283 in Windows
+    Terminal: the suggestion's characters have another foreground colour than
+    the glyph that starts the line (0x666666, dimmed, against 0xCCCCCC), and
+    the caret sits right after the glyph. Typed text has the glyph's colour
+    and the caret at its end, or wherever it was moved. Both signs are
+    required; anything unreadable or in doubt stays a draft.
+
+    Positions are counted from the start of the line, never taken from the
+    range FindText returns: Windows Terminal's runs one character past the
+    match (the glyph and its nbsp came back as three characters).
+    """
+    start = auto.TextPatternRangeEndpoint.Start
+    end = auto.TextPatternRangeEndpoint.End
+    char = auto.TextUnit.Character
+    hit = None
+    for glyph in ("\u276f\xa0", ">\xa0"):
+        hit = rng.FindText(glyph, True, False)
+        if hit:
+            break
+    if not hit:
+        return None
+    line = hit.Clone()
+    line.ExpandToEnclosingUnit(auto.TextUnit.Line, waitTime=0)
+    text = line.GetText(-1).rstrip("\r\n")
+    if not _COMPOSER_LINE_RE.match(text):
+        return None                     # the glyph does not start its line
+    body = text[2:]
+    shown = body.strip()
+    if not shown:
+        return None
+    head = line.Clone()                 # the glyph and its nbsp
+    head.MoveEndpointByRange(end, line, start, waitTime=0)
+    head.MoveEndpointByUnit(end, char, 2, waitTime=0)
+    if head.GetText(-1) != text[:2]:
+        return None
+    lead = len(body) - len(body.lstrip())
+    span = head.Clone()                 # exactly the shown text
+    span.MoveEndpointByRange(start, head, end, waitTime=0)
+    span.MoveEndpointByUnit(end, char, lead + len(shown), waitTime=0)
+    if lead:
+        span.MoveEndpointByUnit(start, char, lead, waitTime=0)
+    if span.GetText(-1) != shown:
+        return None
+    mark = head.Clone()                 # the glyph alone
+    mark.MoveEndpointByUnit(end, char, -1, waitTime=0)
+    glyph_color, text_color = _uia_color(mark), _uia_color(span)
+    if glyph_color is None or text_color is None or glyph_color == text_color:
+        return None
+    selection = tp.GetSelection()
+    if len(selection) != 1:
+        return None
+    caret = selection[0].textRange
+    if caret.CompareEndpoints(start, caret, end) != 0:
+        return None                     # text is selected, not a caret
+    if caret.CompareEndpoints(start, head.textRange, end) != 0:
+        return None
+    return text
+
+
+def _without_suggestion(text, tp, rng):
+    """`text` with a prompt suggestion taken out of its input box line.
+
+    Only looked for when the text alone says the box holds something, so an
+    empty box costs nothing extra.
+    """
+    if not text or not composer_has_draft(text):
+        return text
+    try:
+        shown = _suggestion_line(tp, rng)
+    except Exception:
+        return text
+    if not shown:
+        return text
+    lines = text.splitlines(keepends=True)
+    for i in range(len(lines) - 1, -1, -1):
+        row = lines[i].rstrip("\r\n")
+        if _COMPOSER_LINE_RE.match(row) and row.rstrip() == shown.rstrip():
+            lines[i] = row[:2] + lines[i][len(row):]
+            return "".join(lines)
+    return text
 
 
 # ---------------------------------------------------------------------------
@@ -1536,6 +1647,28 @@ def composer_has_draft(text: str) -> bool:
     return False
 
 
+def composer_text(text: str):
+    """What the input box on screen holds, or None when there is no box.
+
+    The box is the LAST composer line (the live one; a sent prompt shown in
+    the conversation has a plain space after its glyph, see
+    _COMPOSER_LINE_RE) together with the rows a long entry wraps onto, which
+    run until the rule that closes the box.
+    """
+    if not text:
+        return None
+    lines = text.splitlines()
+    for i in range(len(lines) - 1, -1, -1):
+        if _COMPOSER_LINE_RE.match(lines[i]):
+            out = [lines[i][2:]]
+            for more in lines[i + 1:i + 40]:
+                if more.strip().startswith("─"):
+                    break
+                out.append(more)
+            return "\n".join(out)
+    return None
+
+
 TRIGGER_SPECS = [
     {
         "key": "limit",
@@ -1785,12 +1918,80 @@ def send_continue(window_ctrl, dry_run: bool = False) -> bool:
     return send_text_lines(window_ctrl, ["continue"], dry_run=dry_run)
 
 
-def send_text_lines(window_ctrl, lines, dry_run: bool = False) -> bool:
+# Typing is confirmed on the screen before the foreground goes back. Keys
+# injected with SendInput are routed to whichever window is in front when
+# Windows gets round to them, not when they were sent, and on a busy machine
+# that lags behind the typing: a 216-character line lost its last word and its
+# Enter to the previously active window while the call reported success
+# (2026-10-21, a companion's preset). So the line must be seen in the input
+# box before Enter is pressed, and seen gone from it before focus is handed
+# back.
+TYPE_CHUNK = 16             # characters typed between two foreground checks
+TYPED_CONFIRM_S = 2.0       # for typed text to show, plus 10 ms a character
+SUBMIT_CONFIRM_S = 3.0      # for Enter to take the line out of the box
+UNREAD_SETTLE_S = 0.5       # an unreadable screen confirms nothing: wait
+
+
+def _squash(text) -> str:
+    """Text without whitespace: wrapping and padding differ, characters do not."""
+    return "".join(str(text or "").split())
+
+
+def _typed_landed(before: str, after: str, line: str) -> bool:
+    """Whether `line` has arrived on screen since `before` was read."""
+    want = _squash(line)
+    box = composer_text(after)
+    if box is not None:
+        return want in _squash(box)
+    # No Claude input box to look in (bash mode, another program): the line
+    # must be on screen near the bottom more often than it was before.
+    span = 2 * len(line) + 2500
+    return _squash(after[-span:]).count(want) > _squash(before[-span:]).count(want)
+
+
+def _line_submitted(pre: str, after: str, line: str) -> bool:
+    """Whether Enter took `line` out of the box it was typed into."""
+    if composer_text(pre) is not None:
+        box = composer_text(after)
+        return box is None or _squash(line) not in _squash(box)
+    return after != pre
+
+
+def _await_screen(window_ctrl, done, timeout: float):
+    """Read the window until done(text) holds: True, False on timeout, or None
+    when the screen cannot be read at all."""
+    deadline = time.monotonic() + timeout
+    while True:
+        text = read_terminal_text(window_ctrl)
+        if text is None:
+            return None
+        if done(text):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.1)
+
+
+def _send_refused(outcome, reason: str) -> bool:
+    if outcome is not None:
+        outcome["reason"] = reason
+    return False
+
+
+def send_text_lines(window_ctrl, lines, dry_run: bool = False,
+                    outcome: dict | None = None) -> bool:
     """Activate the window's TermControl, then type each line followed by
     Enter, with a small pause between consecutive submissions so Claude
     Code can fully process slash commands before the next message arrives.
 
-    Same caveats as send_continue: returns True/False, no stdout output.
+    True only once every line was seen arriving and being submitted (where
+    the screen can be read). On False, `outcome["reason"]` (when a dict is
+    passed) says why: 'foreground' (nothing typed), 'focus_lost' (another
+    window took the foreground partway; part of a line may be in the box),
+    'not_confirmed' (typed, but the screen never showed it arrive, or never
+    showed Enter take it; nothing further was pressed), 'send_error'.
+
+    Same caveats as send_continue: no stdout output.
     """
     if not lines:
         return True
@@ -1836,8 +2037,9 @@ def send_text_lines(window_ctrl, lines, dry_run: bool = False) -> bool:
             if target_hwnd and _get_foreground_hwnd() == target_hwnd:
                 break
         if _get_foreground_hwnd() != target_hwnd:
-            return False
+            return _send_refused(outcome, "foreground")
         for i, line in enumerate(lines):
+            line = str(line)
             if i > 0:
                 # Slash commands like /effort apply synchronously but Claude
                 # Code's TUI needs a beat to render the resulting state
@@ -1850,10 +2052,29 @@ def send_text_lines(window_ctrl, lines, dry_run: bool = False) -> bool:
                 # Stopping mid-sequence is recoverable — the caller retries
                 # — while typing into the wrong app is not.
                 if _get_foreground_hwnd() != target_hwnd:
-                    return False
+                    return _send_refused(outcome, "focus_lost")
+            before = read_terminal_text(window_ctrl)
             try:
-                auto.SendKeys(sendkeys_literal(line) + "{Enter}",
-                              interval=0.02)
+                # In pieces, each behind a foreground check: a window that
+                # takes over mid-line gets a few characters, not the rest.
+                for k in range(0, len(line), TYPE_CHUNK):
+                    if _get_foreground_hwnd() != target_hwnd:
+                        return _send_refused(outcome, "focus_lost")
+                    auto.SendKeys(sendkeys_literal(line[k:k + TYPE_CHUNK]),
+                                  interval=0.02, waitTime=0)
+                if line.strip() and before is not None:
+                    seen = _await_screen(
+                        window_ctrl,
+                        lambda t: _typed_landed(before, t, line),
+                        TYPED_CONFIRM_S + 0.01 * len(line))
+                    if seen is False:
+                        # Never press Enter on a line that did not all
+                        # arrive: that would send part of it.
+                        return _send_refused(outcome, "not_confirmed")
+                if _get_foreground_hwnd() != target_hwnd:
+                    return _send_refused(outcome, "focus_lost")
+                pre = read_terminal_text(window_ctrl)
+                auto.SendKeys("{Enter}", interval=0.02, waitTime=0)
             except Exception:
                 # A throw here used to escape into the watcher's per-window
                 # loop, which then had no guard of its own — so one
@@ -1865,7 +2086,19 @@ def send_text_lines(window_ctrl, lines, dry_run: bool = False) -> bool:
                 # free-typed text; sendkeys_literal escapes those now, but
                 # the containment must not depend on having predicted every
                 # input.)
-                return False
+                return _send_refused(outcome, "send_error")
+            if pre is None:
+                time.sleep(UNREAD_SETTLE_S + 0.005 * len(line))
+            elif line.strip():
+                gone = _await_screen(
+                    window_ctrl, lambda t: _line_submitted(pre, t, line),
+                    SUBMIT_CONFIRM_S)
+                if gone is False:
+                    return _send_refused(outcome, "not_confirmed")
+            else:
+                # A bare Enter answers a dialog; there is no text to watch,
+                # only the screen moving on. Not insisted upon.
+                _await_screen(window_ctrl, lambda t: t != pre, 1.0)
         return True
     finally:
         time.sleep(0.15)
@@ -2007,6 +2240,9 @@ def send_keys(window_ctrl, keyspec: str, dry_run: bool = False) -> bool:
             return False        # same containment as send_text_lines
         return True
     finally:
-        time.sleep(0.15)
+        # Raw keys mean nothing that could be looked for on screen, so unlike
+        # send_text_lines nothing is confirmed here; a longer spec just keeps
+        # the foreground longer before it is handed back (see TYPE_CHUNK).
+        time.sleep(min(1.5, 0.15 + 0.005 * len(str(keyspec))))
         if saved_fg and saved_fg != target_hwnd:
             _set_foreground_hwnd(saved_fg)

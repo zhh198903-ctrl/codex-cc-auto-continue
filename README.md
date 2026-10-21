@@ -1,5 +1,10 @@
 # Codex/CC Auto-Continue
 
+## Claude CLI typing fixes (3.3.2)
+
+- **A suggested prompt is not a draft.** After a turn Claude Code may show a suggested next message in the input box, in dim text. As text it looks like something typed, so it held every limit resume, After finish prompt and API send as a draft. The input box is now read with its colours and cursor: text dimmer than the box's prompt sign, with the cursor in front of it, counts as an empty box. Typed text (normal colour, cursor after it or wherever it was moved) still holds everything, and an unreadable box still counts as a draft. Measured on Claude Code 2.1.283 in Windows Terminal; the suggestion setting itself is left alone.
+- **Typed lines are confirmed on the screen.** Windows delivers typed keys to whichever window is in front when it processes them, and the previous window was put back in front right after typing. On a busy machine the end of a long line and its Enter went to that window while the send counted as done. Each line is now typed in short pieces behind a foreground check. Enter is pressed only once the whole line shows in the input box, and the previous window comes back only after Enter has taken the line out. A send that cannot be confirmed fails with a reason (`focus_lost`, `not_confirmed`) instead of reporting success.
+
 ## Claude EXE: the Claude desktop app (3.3.0)
 
 A fourth monitor type, **off by default**, for Claude Code sessions in the Claude desktop app. It handles the session showing in each Claude window, the way Codex EXE does:

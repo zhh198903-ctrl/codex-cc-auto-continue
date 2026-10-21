@@ -863,6 +863,296 @@ _fg_check(_w, fg_hwnd=111, expect_ok=False,
 
 # =============================================================================
 print()
+print("---- prompt suggestion is not a draft ----")
+# Claude Code 2.1 can show a suggested next prompt IN the input box: dim
+# text, caret in front of it. As plain text that is a draft, and a draft
+# holds every send (2026-10-21: a companion was refused reason=draft for a
+# box nobody had typed in). The colours and caret positions below are the
+# ones read off a live 2.1.283 session in Windows Terminal.
+_G = chr(0x276F) + "\xa0"           # the input box's glyph and its nbsp
+_RULE = chr(0x2500) * 30
+_NORMAL, _DIM = 13421772, 6710886   # 0xCCCCCC and the dimmed 0x666666
+
+
+class _UiaDoc:
+    def __init__(self, text, colors, caret, sel_end=None, colors_ok=True):
+        self.text, self.colors = text, colors
+        self.caret, self.sel_end = caret, sel_end
+        self.colors_ok = colors_ok
+
+
+class _UiaRange:
+    """The few IUIAutomationTextRange calls the code makes, on a string."""
+
+    def __init__(self, doc, s, e):
+        self.doc, self.s, self.e = doc, s, e
+
+    @property
+    def textRange(self):            # the raw COM object, as uiautomation has
+        return self
+
+    def Clone(self):
+        return _UiaRange(self.doc, self.s, self.e)
+
+    def _at(self, ep):
+        return self.s if ep == 0 else self.e
+
+    def _put(self, ep, pos):
+        pos = max(0, min(len(self.doc.text), pos))
+        if ep == 0:
+            self.s, self.e = pos, max(self.e, pos)
+        else:
+            self.e, self.s = pos, min(self.s, pos)
+
+    def CompareEndpoints(self, ep, other, ep2):
+        a, b = self._at(ep), other._at(ep2)
+        return (a > b) - (a < b)
+
+    def MoveEndpointByRange(self, ep, other, ep2, waitTime=0):
+        self._put(ep, other._at(ep2))
+        return True
+
+    def MoveEndpointByUnit(self, ep, unit, count, waitTime=0):
+        self._put(ep, self._at(ep) + count)
+        return count
+
+    def ExpandToEnclosingUnit(self, unit, waitTime=0):
+        t = self.doc.text
+        self.s = t.rfind("\n", 0, self.s) + 1
+        nl = t.find("\n", self.s)
+        self.e = len(t) if nl < 0 else nl + 1
+        return True
+
+    def FindText(self, needle, backward, ignore_case):
+        t = self.doc.text
+        i = (t.rfind(needle, self.s, self.e) if backward
+             else t.find(needle, self.s, self.e))
+        # Windows Terminal's match runs one character past the text found
+        # (measured live: the glyph and its nbsp came back as three).
+        return None if i < 0 else _UiaRange(
+            self.doc, i, min(len(t), i + len(needle) + 1))
+
+    def GetText(self, n):
+        return self.doc.text[self.s:self.e]
+
+    def GetAttributeValue(self, attr):
+        seen = set(self.doc.colors[self.s:self.e])
+        if not self.doc.colors_ok or len(seen) != 1:
+            return object()         # the "mixed"/"not supported" markers
+        return seen.pop()
+
+
+class _UiaPattern:
+    def __init__(self, doc):
+        self.doc = doc
+
+    @property
+    def DocumentRange(self):
+        return _UiaRange(self.doc, 0, len(self.doc.text))
+
+    def GetSelection(self):
+        end = self.doc.caret if self.doc.sel_end is None else self.doc.sel_end
+        return [_UiaRange(self.doc, self.doc.caret, end)]
+
+
+class _UiaTerm:
+    ClassName = "TermControl"
+
+    def __init__(self, doc):
+        self.doc = doc
+
+    def GetTextPattern(self):
+        return _UiaPattern(self.doc)
+
+    def GetChildren(self):
+        return []
+
+
+def _box_screen(shown, shown_color, caret_at, sel_len=0, colors_ok=True):
+    """A screen whose input box shows `shown` in `shown_color` (one colour,
+    or one per character); the caret at 'start', 'end' or an index."""
+    head = "conversation\n" + _RULE + "\n"
+    line = _G + shown + " " * 8 + "\n"
+    tail = _RULE + "\n  status\n"
+    text = head + line + tail
+    per_char = (shown_color if isinstance(shown_color, list)
+                else [shown_color] * len(shown))
+    colors = ([_NORMAL] * (len(head) + 2) + per_char
+              + [_NORMAL] * (len(line) - 2 - len(shown) + len(tail)))
+    pos = {"start": 0, "end": len(shown)}.get(caret_at, caret_at)
+    caret = len(head) + 2 + pos
+    return _UiaTerm(_UiaDoc(text, colors, caret,
+                            caret + sel_len if sel_len else None, colors_ok))
+
+
+_SUGG = "delete the test files"
+_t = ac.read_terminal_text(_box_screen(_SUGG, _DIM, "start"))
+tcheck("suggestion: dim text, caret before it -> box reads empty",
+       _t is not None and not ac.composer_has_draft(_t)
+       and _SUGG not in _t and ac.composer_text(_t).strip() == "")
+tcheck("suggestion: the rest of the screen is untouched",
+       _t.startswith("conversation\n") and _t.endswith("  status\n"))
+_t = ac.read_terminal_text(_box_screen("abc", _NORMAL, "end"))
+tcheck("typed draft (normal colour, caret at end) stays a draft",
+       ac.composer_has_draft(_t) and "abc" in _t)
+_t = ac.read_terminal_text(_box_screen("abc", _NORMAL, 1))
+tcheck("typed draft with the caret moved stays a draft",
+       ac.composer_has_draft(_t))
+_t = ac.read_terminal_text(_box_screen("abc", _NORMAL, "start"))
+tcheck("typed draft with the caret at its start stays a draft (colour decides)",
+       ac.composer_has_draft(_t))
+_t = ac.read_terminal_text(_box_screen(_SUGG, _DIM, "end"))
+tcheck("dim text with the caret after it stays a draft (caret decides)",
+       ac.composer_has_draft(_t))
+_t = ac.read_terminal_text(_box_screen(_SUGG, _DIM, "start", colors_ok=False))
+tcheck("colours unreadable -> stays a draft", ac.composer_has_draft(_t))
+_mixed = [_NORMAL] * 3 + [_DIM] * (len(_SUGG) - 3)
+_t = ac.read_terminal_text(_box_screen(_SUGG, _mixed, 3))
+tcheck("typed start + dim rest (mixed colours) stays a draft",
+       ac.composer_has_draft(_t))
+_t = ac.read_terminal_text(_box_screen(_SUGG, _DIM, "start", sel_len=4))
+tcheck("text selected rather than a caret -> stays a draft",
+       ac.composer_has_draft(_t))
+_t = ac.read_terminal_text(_box_screen("", _DIM, "start"))
+tcheck("empty box is still read as empty", _t is not None
+       and not ac.composer_has_draft(_t))
+
+
+# =============================================================================
+print()
+print("---- typing is confirmed before the foreground goes back ----")
+# Keys sent with SendInput reach whichever window is in front when Windows
+# gets to them. Handing the foreground back right after typing lost the end
+# of a 216-character line and its Enter to the previous window, and the call
+# still said ok (2026-10-21). The simulated box below shows typed text only
+# after a few reads, and can drop the tail or ignore Enter.
+
+
+class _Box:
+    def __init__(self, lag=0, drop=0, take_enter=True, enter_lag=0,
+                 steal_after=None):
+        self.box, self.sent, self.events = "", [], []
+        self.lag, self.drop = lag, drop
+        self.take_enter, self.enter_lag = take_enter, enter_lag
+        self.steal_after, self.typed_calls = steal_after, 0
+        self.reads_since_type, self.reads_since_enter = 0, 0
+        self.pending_enter = False
+        self.fg = 555
+
+    def keys(self, spec, interval=0.02, waitTime=0.5, **_):
+        if spec == "{Enter}":
+            self.events.append(("enter", self.shown()))
+            self.pending_enter, self.reads_since_enter = True, 0
+            return
+        self.typed_calls += 1
+        self.box += spec
+        self.reads_since_type = 0
+        self.events.append(("type", spec))
+        if self.steal_after and self.typed_calls >= self.steal_after:
+            self.fg = 111
+
+    def shown(self):
+        if self.reads_since_type < self.lag:
+            return self.box[:len(self.box) // 2]
+        return self.box[:len(self.box) - self.drop] if self.drop else self.box
+
+    def read(self, w):
+        self.reads_since_type += 1
+        if self.pending_enter:
+            self.reads_since_enter += 1
+            if self.take_enter and self.reads_since_enter > self.enter_lag:
+                self.sent.append(self.box)
+                self.box, self.pending_enter = "", False
+                self.events.append(("cleared", None))
+        return ("conversation\n"
+                + "".join(chr(0x276F) + " " + s + "\n" for s in self.sent)
+                + _RULE + "\n" + _G + self.shown() + "\n" + _RULE
+                + "\n  status\n")
+
+    def restore(self, hwnd):
+        self.events.append(("restore", hwnd))
+
+
+def _run_send(box, lines):
+    saved = (ac.read_terminal_text, ac.auto.SendKeys, ac._get_foreground_hwnd,
+             ac._set_foreground_hwnd, ac.TYPED_CONFIRM_S, ac.SUBMIT_CONFIRM_S)
+    calls = {"n": 0}
+
+    def fg():
+        calls["n"] += 1
+        return 999 if calls["n"] == 1 else box.fg    # 1st read: saved fg
+
+    ac.read_terminal_text = box.read
+    ac.auto.SendKeys = box.keys
+    ac._get_foreground_hwnd = fg
+    ac._set_foreground_hwnd = box.restore
+    ac.TYPED_CONFIRM_S, ac.SUBMIT_CONFIRM_S = 0.3, 0.3
+    why = {}
+    try:
+        ok = ac.send_text_lines(_FakeTerm(hwnd=555), lines, outcome=why)
+    finally:
+        (ac.read_terminal_text, ac.auto.SendKeys, ac._get_foreground_hwnd,
+         ac._set_foreground_hwnd, ac.TYPED_CONFIRM_S,
+         ac.SUBMIT_CONFIRM_S) = saved
+    return ok, why.get("reason"), box
+
+
+_LONG = ("Explain TCP congestion control in depth, covering slow start, "
+         "congestion avoidance, fast retransmit and fast recovery. Do not "
+         "use tools.")
+ok, why, b = _run_send(_Box(lag=3, enter_lag=2), [_LONG])
+_kinds = [k for k, _ in b.events]
+tcheck("long line typed in pieces, all of it sent once seen",
+       ok is True and b.sent == [_LONG]
+       and sum(1 for k in _kinds if k == "type") > 1)
+tcheck("Enter pressed only after the whole line was on screen",
+       [v for k, v in b.events if k == "enter"] == [_LONG])
+tcheck("foreground handed back only after Enter took the line",
+       "cleared" in _kinds and _kinds.index("restore") > _kinds.index("cleared"))
+
+ok, why, b = _run_send(_Box(drop=7), [_LONG])
+tcheck("tail never arrives -> no Enter, reason not_confirmed",
+       ok is False and why == "not_confirmed"
+       and "enter" not in [k for k, _ in b.events] and b.sent == [])
+
+ok, why, b = _run_send(_Box(take_enter=False), ["continue"])
+tcheck("Enter never takes the line -> reason not_confirmed",
+       ok is False and why == "not_confirmed" and b.sent == [])
+
+ok, why, b = _run_send(_Box(steal_after=2), [_LONG])
+tcheck("another window takes the foreground mid-line -> typing stops",
+       ok is False and why == "focus_lost"
+       and sum(1 for k, _ in b.events if k == "type") == 2
+       and "enter" not in [k for k, _ in b.events])
+
+ok, why, b = _run_send(_Box(), ["/model sonnet", "", "continue"])
+tcheck("multi-line sequence with a bare Enter still goes through",
+       ok is True and b.sent == ["/model sonnet", "", "continue"])
+
+_sent = []
+_saved = (ac._get_foreground_hwnd, ac.auto.SendKeys)
+ac._get_foreground_hwnd = lambda: 555
+ac.auto.SendKeys = lambda *a, **k: _sent.append(a[0])
+try:
+    ok = send_text_lines(_FakeTerm(hwnd=555), ["continue"], outcome={})
+finally:
+    ac._get_foreground_hwnd, ac.auto.SendKeys = _saved
+tcheck("unreadable screen: types as before (nothing to confirm against)",
+       ok is True and "".join(_sent) == "continue{Enter}")
+
+_why = {}
+_saved = ac._get_foreground_hwnd
+ac._get_foreground_hwnd = lambda: 111
+try:
+    ok = send_text_lines(_FakeTerm(hwnd=555), ["continue"], outcome=_why)
+finally:
+    ac._get_foreground_hwnd = _saved
+tcheck("never reached the foreground -> reason foreground",
+       ok is False and _why.get("reason") == "foreground")
+
+
+# =============================================================================
+print()
 print("---- plan-mode approval ----")
 # The prompt that ends plan mode is the case this feature most needs to
 # clear: the plan is written, and the session waits on a chooser before any

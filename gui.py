@@ -1362,7 +1362,9 @@ class Watcher(QObject):
                             f"{dr}sending {lines} to {_wt}"
                             + (" (forced)" if force_fire else "")
                         )
-                        ok = send_text_lines(w, lines, dry_run=self._dry_run)
+                        _why = {}
+                        ok = send_text_lines(w, lines, dry_run=self._dry_run,
+                                             outcome=_why)
                         if ok:
                             st.last_sent_utc = now
                             st.fired_key = st.reset_key
@@ -1380,7 +1382,8 @@ class Watcher(QObject):
                             )
                         else:
                             self.log.emit("warn",
-                                          f"send failed for {_wt}; "
+                                          f"send failed for {_wt} "
+                                          f"({_why.get('reason', 'foreground')}); "
                                           f"will retry in {self._interval}s")
                             st.reset_utc = now  # immediate retry next tick
                             st.fire_deferred = False
@@ -1458,8 +1461,10 @@ class Watcher(QObject):
                             self.log.emit(
                                 "fire",
                                 f"{dr}after-finish → {_wt}: {af_cmd!r}")
+                            _why = {}
                             if send_text_lines(w, [af_cmd],
-                                               dry_run=self._dry_run):
+                                               dry_run=self._dry_run,
+                                               outcome=_why):
                                 # Re-arm only after it is seen running again:
                                 # once per completed run, not once per tick.
                                 st.af_seen_running = False
@@ -1479,7 +1484,8 @@ class Watcher(QObject):
                             else:
                                 self.log.emit(
                                     "warn",
-                                    f"after-finish send failed for {_wt}; "
+                                    f"after-finish send failed for {_wt} "
+                                    f"({_why.get('reason', 'foreground')}); "
                                     f"will retry next tick")
 
             except Exception as _e:
@@ -1610,14 +1616,19 @@ class Watcher(QObject):
                 out.put({"ok": False, "reason": "draft"})
                 return
             # send_text_lines verifies the foreground actually landed on the
-            # target and refuses to type otherwise; a False here means nothing
-            # was typed, which is the answer the caller needs.
-            ok = send_text_lines(target, list(lines))
+            # target and refuses to type otherwise ('foreground': nothing was
+            # typed). It also waits to see each line arrive in the box and
+            # leave it before handing the foreground back, and says which
+            # part failed ('focus_lost', 'not_confirmed') — reported as such,
+            # since then something may be sitting in the box.
+            why = {}
+            ok = send_text_lines(target, list(lines), outcome=why)
+            reason = why.get("reason", "foreground")
             self.log.emit("fire", f"api: send hwnd={hwnd:#x} "
                                   f"lines={len(lines)}"
-                                  + ("" if ok else " (refused)"))
+                                  + ("" if ok else f" (refused: {reason})"))
             out.put({"ok": True} if ok
-                    else {"ok": False, "reason": "foreground"})
+                    else {"ok": False, "reason": reason})
         except Exception as exc:
             # Never let a caller take the watcher down with a bad request.
             try:
@@ -4408,6 +4419,28 @@ wherever the prompt's cursor sits, even after the arrow keys have moved it
 off the first option. <b>Fire now</b> is your own instruction and is not
 held. Before 2.1.4, After finish in particular could answer a permission
 prompt you had left for yourself.</p>
+<p><b>A suggested prompt is not a draft.</b> After a turn Claude Code may show
+a suggestion for your next message in the input box, in dim text (Tab takes
+it; typing replaces it; Enter on its own sends nothing). It only looks like
+text you typed, so until 3.3.2 it held every send exactly like a real draft.
+Now the input box is read with its colours and cursor: text dimmer than the
+box's prompt sign, with the cursor in front of it, is the suggestion and
+counts as an empty box. Your own text is drawn in the normal colour, with the
+cursor after it or wherever you moved it, and still holds everything. When
+the colours or the cursor cannot be read, the text counts as a draft, as
+before. The suggestion is also left out of the screen text a companion
+program reads.</p>
+<p><b>Each typed line is checked on the screen.</b> Windows delivers typed keys
+to whichever window is in front when it gets to them, which on a busy machine
+can be a moment after they were sent. Before 3.3.2 the window you were using
+was put back in front straight after typing, and the last word of a long
+line and its Enter could go to that window instead, while the send still
+counted as done. Now each line is typed in short pieces, stopping if another
+window takes the foreground. Enter is pressed only once the whole line shows
+in the input box, and your window comes back only after Enter has taken the
+line out of the box. When the screen does not show that, the send counts as
+failed and nothing more is pressed. A line still sitting in the box then holds
+the next attempt, as any draft does.</p>
 
 <h3>Claude EXE (the Claude desktop app)</h3>
 <p><b>Off by default.</b> Turn on <b>Monitor this type</b> on the Claude EXE tab.
@@ -4655,6 +4688,19 @@ after it and submitted with it, as one message. So the send is refused as
 <code>draft</code>: nothing is typed, the half-typed text is left exactly as
 it was, and the caller can tell its user. Keystrokes are not checked this
 way, because Enter and Esc act on whatever prompt is open.</p>
+<p><b>A send is answered after it has been seen on the screen.</b> Each line
+must show in the input box before its Enter, and leave the box after it (see
+<i>A suggested prompt is not a draft</i> and <i>Each typed line is checked on
+the screen</i> under Claude CLI). A failure says which part went wrong:
+<code>foreground</code> means the window would not come forward and nothing
+was typed; <code>focus_lost</code> means another window took the foreground
+partway, so part of a line may be in the box; <code>not_confirmed</code>
+means the line was typed but the screen never showed all of it arrive, or
+never showed Enter take it, and nothing further was pressed. In the last two
+cases read the screen before trying again. Keystroke specs are not checked
+this way; a long one keeps the window in front a little longer before your
+window comes back. Until 3.3.2 a send could answer <code>ok</code> while its
+end had gone to another window.</p>
 <p>A keystroke spec containing a key name this tool cannot press is refused
 as <code>bad_keyspec</code>, naming the key, before the window is touched.
 Backspace, for instance, is spelled <code>{{Back}}</code>. Anything else

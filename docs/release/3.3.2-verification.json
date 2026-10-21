@@ -1,0 +1,126 @@
+{
+  "version": "3.3.2",
+  "date": "2026-10-21",
+  "exe_sha256": "f49279a24844dedc643e0b840f2c410637cf5434b8bc15df5194abc1b9fbb0c0",
+  "exe_bytes": 28035453,
+  "changes": [
+    "Claude CLI input box: a prompt suggestion (text dimmer than the glyph, caret right after the glyph) reads as an empty box",
+    "Claude CLI typing: per-chunk foreground checks; Enter only after the line shows in the box; foreground handed back only after Enter took it; failures report focus_lost / not_confirmed"
+  ],
+  "reported_by": "Codex Claude Control session (prompt-suggestion draft refusal 18:24:41; long send tail lost 18:31:00, 2026-10-21)",
+  "live_measurements": {
+    "claude_code": "2.1.283 in Windows Terminal (ccdebug probe, Sonnet)",
+    "suggestion_colour_vs_glyph": [
+      "0x666666",
+      "0xCCCCCC"
+    ],
+    "suggestion_caret": "right after the glyph and its nbsp",
+    "typed_draft": "glyph colour, caret at end (or where moved)",
+    "enter_on_empty_box_with_suggestion": "sends nothing (transcript unchanged)",
+    "findtext_overshoot": "FindText match range ran one character past the text (the glyph and its nbsp came back as three)",
+    "suggestion_gating": "generated only while the terminal is focused; while unused, shown every 10th eligible turn"
+  },
+  "source_checks": {
+    "legacy_checks": 705,
+    "unittest": 174,
+    "pytest": 96,
+    "subtests": 19,
+    "new_checks": 19,
+    "mutations_turned_red": [
+      "no blanking",
+      "no caret check",
+      "no colour check",
+      "no pre-Enter wait",
+      "no post-Enter wait",
+      "no per-chunk foreground check",
+      "FindText end used (the live bug)"
+    ]
+  },
+  "source_on_real_cli": {
+    "long_send_205_chars_exact_in_transcript": true,
+    "drawn_terminal_states": {
+      "suggestion": "empty box",
+      "draft_end": "draft",
+      "draft_home": "draft",
+      "dim_caret_end": "draft"
+    }
+  },
+  "packaged_selftest_passed": true,
+  "installed_exe_verified": {
+    "path": "D:\\claude\\auto_continue\\dist\\Auto-Continue.exe",
+    "previous_backed_up_sha256": "7c59c91ce1c153d21844853229a60b2a4f95db130709c32f162df7096481a300",
+    "run": {
+      "probe": 1773178,
+      "transcript": "dd3a2407-d281-4ae4-a425-b031a9d09f60.jsonl",
+      "launch": "started pid=16576",
+      "title": "Auto-Continue v3.3.2 · Claude / Codex",
+      "version_api": "3.3.2",
+      "exe_paths": [
+        "D:\\claude\\aipassport\\cc_remote\\CodexClaudeControl_dist\\CodexClaudeControl\\bundled\\Auto-Continue.exe",
+        "D:\\claude\\auto_continue\\dist\\Auto-Continue.exe"
+      ],
+      "drawn_hwnd": 527988,
+      "A_drawn": {
+        "SUGGESTION": {
+          "box_in_api_text": "",
+          "send": {
+            "ok": false,
+            "reason": "not_confirmed"
+          }
+        },
+        "DRAFT_END": {
+          "box_in_api_text": "delete the test files",
+          "send": {
+            "ok": false,
+            "reason": "draft"
+          }
+        }
+      },
+      "A_drawn_closed_itself": true,
+      "B_send": {
+        "ok": true
+      },
+      "B_seconds": 6.02,
+      "B_new_prompts_exact": true,
+      "C_after_finish_exact": true,
+      "C_new_prompts": [
+        "After finish long prompt test: reply with exactly "
+      ],
+      "C_after_finish_count": 1,
+      "C_log": [
+        "19:11:14 [fire] api: send hwnd=0x80e74 lines=1 (refused: not_confirmed)",
+        "19:11:34 [info] api: send hwnd=0x80e74 not typed — the input box holds unsent text",
+        "19:12:05 [fire] api: send hwnd=0x1b0e7a lines=1",
+        "19:13:43 [fire] after-finish → 'powershell' #0e7a: 'After finish long prompt test: reply with exactly the word AFTEROK and nothing else. This sentence only pads the prompt so that it is long, like a real follow-up about fast retransmit and fast recovery. Do not use tools.'",
+        "19:13:49 [info] after-finish for 'powershell': no runs left — set Loops again to re-arm",
+        "19:13:53 [info] after-finish on 'powershell' #0e7a: no runs left (Loops 0) — set Loops again to re-arm"
+      ],
+      "spinner_names": [
+        "Settings",
+        "Settings",
+        "Settings"
+      ],
+      "D_spin_before_after": [
+        5.0,
+        6.0
+      ],
+      "D_saved_interval": "6",
+      "closed_1": true,
+      "log_1_tail": [
+        "19:11:14 [fire] api: send hwnd=0x80e74 lines=1 (refused: not_confirmed)",
+        "19:11:34 [info] api: send hwnd=0x80e74 not typed — the input box holds unsent text",
+        "19:12:05 [fire] api: send hwnd=0x1b0e7a lines=1",
+        "19:13:43 [fire] after-finish → 'powershell' #0e7a: 'After finish long prompt test: reply with exactly the word AFTEROK and nothing else. This sentence only pads the prompt so that it is long, like a real follow-up about fast retransmit and fast recovery. Do not use tools.'",
+        "19:13:49 [info] after-finish for 'powershell': no runs left — set Loops again to re-arm",
+        "19:13:53 [info] after-finish on 'powershell' #0e7a: no runs left (Loops 0) — set Loops again to re-arm"
+      ],
+      "D_after_restart": 6.0,
+      "title_after_restart": "Auto-Continue v3.3.2 · Claude / Codex",
+      "closed_2": true
+    }
+  },
+  "user_codex_windows_operated": false,
+  "claude_login_or_underlying_changes": false,
+  "claude_code_settings_changed": false,
+  "control_bundle_modified": false
+}

@@ -141,6 +141,15 @@ Windows 的 UI Automation 偶尔会拒绝一个窗口，这时它**什么都没�
    `api: send … not typed — the input box holds unsent text`（2.1.4 起）：
    那个窗口的输入框里有人打了一半的字，配套程序拿到 `draft`，什么都没打、也没清。
    以前会把新内容接在草稿后面一起提交。
+   输入框里的**灰字建议**（Claude Code 回合结束后给的下一句提示，Tab 采纳）不算草稿（3.3.2 起）：
+   按颜色和光标区分——比提示符暗、光标停在它前面的是建议；正常颜色的字才是草稿。
+   3.3.1 及之前会把建议当草稿，于是限额续接、After finish 和配套程序的 send 一律被拦（`draft`）。
+   `api: send … (refused: not_confirmed)` / `(refused: focus_lost)`、
+   `send failed for … (not_confirmed)`（3.3.2 起）：每行字要先在输入框里看到、
+   回车后再看到它离开输入框，才算发出去、才把原前台窗口还回去。`focus_lost` 是打到一半
+   别的窗口抢了前台；`not_confirmed` 是打完了但屏幕上没看到全部到达（这时不按回车），
+   或按了回车没看到被取走。这两种情况输入框里可能留着半行字，先看屏幕再决定。
+   3.3.1 及之前长句末尾几个字和回车可能落到原前台窗口，接口却回 `ok`。
    配套程序拿到 `bad_keyspec` 说明键名写错了（退格是 `{Back}`，不是 `{Backspace}`），
    重试没用；这种请求什么都没做，所以日志里也没有它。
    `%APPDATA%\Auto-Continue\local_api.json` 里的 `exe` 是当前运行那一份的路径（2.1.4 起），

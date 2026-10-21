@@ -84,7 +84,7 @@ TEXTS = {}
 SENT = []          # (hwnd, kind, payload)
 
 
-def _send_lines(w, lines, dry_run=False):
+def _send_lines(w, lines, dry_run=False, outcome=None):
     SENT.append((int(w.NativeWindowHandle), "text", list(lines)))
     return True
 

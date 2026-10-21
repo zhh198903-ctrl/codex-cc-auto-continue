@@ -82,7 +82,7 @@ TEXTS = {}
 SENT = []
 
 
-def _send_lines(w, lines, dry_run=False):
+def _send_lines(w, lines, dry_run=False, outcome=None):
     SENT.append((int(w.NativeWindowHandle), list(lines)))
     return True
 
@@ -947,7 +947,7 @@ set_now(T0)
 reset([(25, "win")], {25: CHOOSER + NO_BOX})
 _ok = {"v": False}
 _saved_send = gui.send_text_lines
-gui.send_text_lines = lambda w, lines, dry_run=False: (
+gui.send_text_lines = lambda w, lines, dry_run=False, outcome=None: (
     _send_lines(w, lines) if _ok["v"] else False)
 LOGS_H = []
 w = new_watcher()
@@ -1656,7 +1656,7 @@ try:
           SENT == [(71, ["hello"])])
 
     # An action that has started is typing: never answer busy mid-action.
-    def _slow_send(win, lines, dry_run=False):
+    def _slow_send(win, lines, dry_run=False, outcome=None):
         _tq.sleep(0.6)
         return _send_lines(win, lines)
     gui.send_text_lines = _slow_send
@@ -1675,7 +1675,7 @@ try:
     gui.local_api.STARTED_WAIT_S = 0.1
     _gate = _thq.Event()
 
-    def _stuck_send(win, lines, dry_run=False):
+    def _stuck_send(win, lines, dry_run=False, outcome=None):
         _gate.wait(5)
         return _send_lines(win, lines)
     gui.send_text_lines = _stuck_send
