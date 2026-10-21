@@ -433,6 +433,21 @@ def _draft_of(composer):
     return _BLANK.sub("", value)
 
 
+def _popout_title(names, index):
+    """The session title of a page that does not say "- Claude Code".
+
+    A session opened in its own window (Open in -> new window) titles its
+    page with the bare session title (measured on app 2.42304 by the Control
+    session, 2026-10-21), so the suffix test alone missed it and the window
+    was left unwatched. Such a name is taken only when it is the one name on
+    the page that some desktop transcript carries as its title; read_text
+    also requires a single prompt box with the Code toolbar around it.
+    """
+    titles = {n.strip() for n in names if n.strip()}
+    hits = [t for t in titles if index.find(t)]
+    return hits[0] if len(hits) == 1 else ""
+
+
 def read_text(window, index=None):
     """Read one window: identity, state and the matching transcript."""
     index = index or INDEX
@@ -442,7 +457,7 @@ def read_text(window, index=None):
         nodes = _walk(window.control)
     except Exception:
         return None
-    composers = []
+    composers, doc_names = [], []
     for node in nodes:
         try:
             kind = node.ControlTypeName
@@ -451,8 +466,14 @@ def read_text(window, index=None):
             continue
         if kind == "DocumentControl" and name.endswith(DOC_SUFFIX):
             view.title = name[: -len(DOC_SUFFIX)].strip()
+        elif kind == "DocumentControl":
+            doc_names.append(name)
         elif kind == "EditControl" and "ProseMirror" in (node.ClassName or ""):
             composers.append(node)
+    popout = False
+    if not view.title and len(composers) == 1:
+        view.title = _popout_title(doc_names, index)
+        popout = bool(view.title)
     if not view.title:
         return None                          # not a Code session page
     window.Name = view.title
@@ -466,6 +487,8 @@ def read_text(window, index=None):
     view.draft_text = draft or ""
     region = _composer_region(view.composer)
     if region is None:
+        if popout:
+            return None                      # a bare title alone is not enough
         view.hold = "no_toolbar"
         return _finish(view, index)
     _node, buttons = region

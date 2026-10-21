@@ -136,6 +136,76 @@ class Transcripts(unittest.TestCase):
         self.assertEqual(ca.read_transcript(path).title, "Long one")
 
 
+class Node:
+    """Just enough of a uiautomation control for read_text."""
+
+    def __init__(self, kind, name="", cls="", kids=(), value=None):
+        self.ControlTypeName, self.Name, self.ClassName = kind, name, cls
+        self.kids, self.parent, self.value = list(kids), None, value
+        for kid in self.kids:
+            kid.parent = self
+
+    def GetChildren(self):
+        return list(self.kids)
+
+    def GetParentControl(self):
+        return self.parent
+
+    def GetValuePattern(self):
+        return types.SimpleNamespace(Value=self.value)
+
+
+def page(doc_names, composers=1, toolbar=True):
+    """A Claude window: documents named `doc_names`, the last holding the
+    prompt box(es) and, with `toolbar`, the Code session's buttons."""
+    buttons = [Node("ButtonControl", n) for n in
+               (["添加", "模型：Opus 5.5 超高", "用量：12%", "跳过权限确认"] if toolbar else ["添加"])]
+    boxes = [Node("EditControl", "", "ProseMirror", value="​") for _ in range(composers)]
+    region = Node("GroupControl", kids=boxes + buttons)
+    docs = [Node("DocumentControl", n) for n in doc_names[:-1]]
+    docs.append(Node("DocumentControl", doc_names[-1], kids=[Node("GroupControl", kids=[region])]))
+    return ca.Window(1, Node("PaneControl", "Claude", kids=docs))
+
+
+class ReadWindow(unittest.TestCase):
+    # A session opened in its own window titles its page with the bare
+    # session title, without " - Claude Code" (Control session, 2026-10-21,
+    # app 2.42304): it was read as "not a Code page" and left unwatched.
+    def setUp(self):
+        self.tmp = Tmp()
+        self.addCleanup(self.tmp.dir.cleanup)
+        self.index = ca.TranscriptIndex(self.tmp.root)
+        self.tmp.write("w1", [title("Watch remote test"), prompt("x", "p")])
+
+    def test_main_window_page(self):
+        v = ca.read_text(page(["", "", "Watch remote test - Claude Code"]), self.index)
+        self.assertEqual((v.title, v.identity, v.hold, v.panes), ("Watch remote test", "w1", "", 1))
+
+    def test_popout_page_with_bare_title(self):
+        w = page(["", "Watch remote test"])
+        v = ca.read_text(w, self.index)
+        self.assertEqual((v.title, v.identity, v.hold, v.readable, w.Name),
+                         ("Watch remote test", "w1", "", True, "Watch remote test"))
+
+    def test_bare_name_without_a_session_is_not_a_page(self):
+        self.assertIsNone(ca.read_text(page(["", "Some chat"]), self.index))
+
+    def test_bare_name_needs_the_code_toolbar(self):
+        self.assertIsNone(ca.read_text(page(["Watch remote test"], toolbar=False), self.index))
+
+    def test_bare_name_needs_one_prompt_box(self):
+        self.assertIsNone(ca.read_text(page(["Watch remote test"], composers=2), self.index))
+
+    def test_two_session_names_on_one_page_are_ambiguous(self):
+        self.tmp.write("w2", [title("Other session"), prompt("x", "p")])
+        self.assertIsNone(ca.read_text(page(["Other session", "Watch remote test"]), self.index))
+
+    def test_same_title_twice_is_still_left_alone(self):
+        self.tmp.write("w3", [title("Watch remote test"), prompt("y", "q")])
+        v = ca.read_text(page(["Watch remote test"]), self.index)
+        self.assertEqual((v.hold, v.identity), ("same_title", ""))
+
+
 def view_for(state, running=False, draft="", hold="", identity=None):
     v = ca.View(title=state.title if state else "T", panes=1, composer=object(), readable=True,
                 draft_text=draft, running=running, model="Opus", hold=hold)

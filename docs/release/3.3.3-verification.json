@@ -1,0 +1,79 @@
+{
+  "version": "3.3.3",
+  "date": "2026-10-21",
+  "exe_sha256": "01fed42c391f8301014e282c8cd351598f1acf4026d5f32dbcac276cbed50ee1",
+  "exe_bytes": 28037114,
+  "change": "Claude EXE: a page titled with the bare session title (pop-out window) is accepted when the window has one ProseMirror prompt box with the Code toolbar and exactly one page name matches a desktop transcript title",
+  "reported_by": "Codex Claude Control session (2026-10-21, Claude app 2.42304.2.0)",
+  "live_window": {
+    "hwnd": 22022238,
+    "page_name": "Claude EXE 手表遥控测试会话 (no \" - Claude Code\")",
+    "uia_nodes": 156,
+    "read_text_3_3_2": "None (reproduced by Control)",
+    "read_text_3_3_3": "title, session 64ab933c, one prompt box, toolbar, ready"
+  },
+  "source_checks": {
+    "legacy_suites": "all green",
+    "unittest": 181,
+    "new_cases": 7,
+    "mutations_turned_red": [
+      "no pop-out fallback",
+      "no toolbar requirement",
+      "no one-box requirement",
+      "first matching name wins"
+    ]
+  },
+  "packaged_selftest_passed": true,
+  "installed_exe_verified": {
+    "path": "D:\\claude\\auto_continue\\dist\\Auto-Continue.exe",
+    "previous_backed_up_sha256": "f49279a24844dedc643e0b840f2c410637cf5434b8bc15df5194abc1b9fbb0c0",
+    "control_instances_running": "none (Control exited for the check at its own request, then was restored)",
+    "dry_run": {
+      "live": false,
+      "launch": "started pid=10536",
+      "title": "Auto-Continue v3.3.3 · Claude / Codex",
+      "rows": [
+        "[Claude EXE] Control 更新集成与手表验证",
+        "[Claude EXE] Claude EXE 手表遥控测试会话"
+      ],
+      "popout_row": true,
+      "poll_before_after": [
+        2.0,
+        3.0
+      ],
+      "saved_poll": 3,
+      "closed_1": true,
+      "log_1": [
+        "23:32:41 [info] Claude EXE watcher started"
+      ],
+      "poll_after_restart": 3.0,
+      "popout_row_after_restart": true,
+      "closed_2": true
+    },
+    "live": {
+      "live": true,
+      "launch": "started pid=29836",
+      "title": "Auto-Continue v3.3.3 · Claude / Codex",
+      "rows": [
+        "[Claude EXE] Control 更新集成与手表验证",
+        "[Claude EXE] Claude EXE 手表遥控测试会话"
+      ],
+      "popout_row": true,
+      "closed_1": true,
+      "log_1": [
+        "23:33:19 [info] Claude EXE watcher started",
+        "23:34:06 [fire] Claude EXE #150085e: after-finish prompt; submission confirmed"
+      ]
+    },
+    "live_transcript": [
+      "15:33:49Z user Pop-out kickoff turn (sent by the 3.3.3 source driver)",
+      "15:33:55Z assistant POPOUT1",
+      "15:34:06Z user After finish pop-out test (sent by the installed EXE)",
+      "15:34:11Z assistant POPOUTOK"
+    ],
+    "control_work_session_received_nothing": true
+  },
+  "user_codex_windows_operated": false,
+  "claude_login_or_underlying_changes": false,
+  "control_bundle_modified": false
+}

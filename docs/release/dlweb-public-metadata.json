@@ -104,6 +104,16 @@
     }
   },
   "changelog": {
+    "3.3.3": {
+      "date": "2026-10-21",
+      "items": [
+        {
+          "t": "fix",
+          "zh": "Claude EXE：用「Open in → 新窗口」弹出的 Code 会话也会被监测。弹出窗口的页面标题不带「- Claude Code」，此前整个窗口被跳过，额度续接和完成后续接对它不起作用。",
+          "en": "Claude EXE: Code sessions opened with \"Open in → new window\" are watched too. Their page title lacks \"- Claude Code\", so such a window was skipped and got no limit resume or After finish."
+        }
+      ]
+    },
     "3.3.2": {
       "date": "2026-10-21",
       "items": [
@@ -156,21 +166,6 @@
           "t": "improve",
           "zh": "精简 Claude CLI 监测：Claude Code 退出后留下的终端不再让每轮多等 2 秒，并去掉无用的旧设置页和旧版迁移。限额续接、网络重试、选择框与权限回答、After finish 行为不变。",
           "en": "Streamlines Claude CLI monitoring: a terminal where Claude Code has exited no longer adds a two-second wait to every pass, and an unused settings page and an old migration are removed. Limit resume, network retries, chooser and permission answers and After finish are unchanged."
-        }
-      ]
-    },
-    "3.1.2": {
-      "date": "2026-10-18",
-      "items": [
-        {
-          "t": "fix",
-          "zh": "修复旧独立版本升级后可能出现的 Python DLL 加载错误，替换完成后可自动重新启动。",
-          "en": "Fixes a possible Python DLL loading error after updating an older standalone release, allowing the replacement to restart automatically."
-        },
-        {
-          "t": "improve",
-          "zh": "保留独立 EXE 的一键升级、中文及特殊字符目录支持、原 EXE 备份和设置及监测开关恢复。Control 继续使用内置副本。",
-          "en": "Retains one-action standalone EXE updates, Unicode and special-character folder support, EXE backup, and settings and monitor switch restoration. Control continues using its built-in copy."
         }
       ]
     }

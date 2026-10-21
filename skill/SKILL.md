@@ -14,6 +14,9 @@ Claude Code 的 Windows 看门狗：盯着「窗口停下来了」并替用户�
 页面标题是「<会话标题> - Claude Code」，Claude Code 也把同一标题写进该会话的记录文件（`%USERPROFILE%\.claude\projects`），
 标题能唯一对上一个桌面会话才动手。重名、分屏开了多个会话、找不到记录时一律不动，日志写一次原因
 （`… is not acted on (another session has the same title; …)` 之类）。
+用 Open in → 新窗口 弹出的会话（3.3.3 起也会监测）：弹出窗口的页面标题只有「<会话标题>」，没有「 - Claude Code」，
+3.3.2 及之前因此认不出、整个窗口被跳过。现在只在窗口里恰好一个输入框、周围有 Code 会话自己的按钮（模型、用量），
+且页面上恰好一个名字对得上桌面会话记录标题时才认；重名照旧不动。
 额度用完：等重置时间 + Buffer 后发 `continue`（桌面版自己也可能在那个时间续接，Buffer 让它先来）；
 连接出错：每个 Retry 间隔发一次，最多 Maximum retries 次；After finish：每个完成的回合一次。
 安全拦截、模型自己的额度、登录问题不打字，标为 Needs attention。

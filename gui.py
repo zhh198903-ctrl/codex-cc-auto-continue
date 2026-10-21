@@ -4455,6 +4455,13 @@ title matches exactly one desktop session. Two sessions with the same title,
 more than one session pane open in one window (split view), or no matching
 history: the window is left alone and the log says why, once. Renaming one of
 two same-named sessions is enough.</p>
+<p><b>A session in its own window.</b> A session opened with <i>Open in &rarr;
+new window</i> is watched too (since 3.3.3). Its page is titled with just the
+session's title, without "- Claude Code", so before 3.3.3 such a window was not
+recognised and nothing was done for it. A bare title is accepted only when the
+window has a single prompt box with the Code session's own buttons around it
+(model, usage) and exactly one name on the page matches a desktop session's
+history. The same-title rule above still applies.</p>
 <p><b>What it reads where.</b> Whether a turn is running and whether the prompt
 box holds anything come from the window. Usage limits, connection errors and
 the end of a turn come from the session's history, where Claude Code marks its
