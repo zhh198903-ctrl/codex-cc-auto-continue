@@ -13,7 +13,7 @@ A fourth monitor type, **off by default**, for Claude Code sessions in the Claud
 - **Pop-out windows** (3.3.3): a session opened with *Open in → new window* titles its page with just the session title. That bare title is accepted only with a single prompt box carrying the Code session's own buttons and exactly one name on the page matching a desktop session's history; same-titled sessions are still left alone.
 - **What it reads**: running/idle and the prompt box from the window (UI Automation); usage limits, connection errors and turn completion from the history, where Claude Code flags its own API errors.
 - **What it does**: after a usage limit, `continue` at the reset time plus Buffer; after a connection error, `continue` every Retry interval up to Maximum retries; After finish once per completed turn within its Loops. Safeguard blocks, a model's own limit and login problems get nothing typed and show *Needs attention*.
-- **How it types**: writes into the prompt box and presses the app's Send button (no simulated keys), only with an empty box, no running turn and the same session still showing; a send counts once the history records the new prompt.
+- **How it types**: writes into the prompt box and presses the app's Send button (no simulated keys), only with an empty box, no running turn and the same session still showing; a send counts once the history records the new prompt. Since 3.3.4 the status note the desktop app puts in front of a prompt once a session has linked sessions ("Linked sessions now …") is left out of that comparison; before, every such send was reported unconfirmed although it arrived.
 - **Not yet**: permission prompts and questions are left to you; model and effort are not changed.
 
 ## Claude CLI simplified (3.2.0)

@@ -104,6 +104,16 @@
     }
   },
   "changelog": {
+    "3.3.4": {
+      "date": "2026-10-22",
+      "items": [
+        {
+          "t": "fix",
+          "zh": "Claude EXE：会话有关联会话时，桌面版会在每条提示前加一段状态说明，此前因此每次发送都显示未确认（实际已发出）；现在比对时去掉这段说明，发送能正常确认。",
+          "en": "Claude EXE: once a session has linked sessions, the desktop app puts a status note in front of each prompt, and every send was reported unconfirmed although it arrived; the note is now left out of the comparison."
+        }
+      ]
+    },
     "3.3.3": {
       "date": "2026-10-21",
       "items": [
@@ -151,21 +161,6 @@
           "t": "improve",
           "zh": "只在会话标题唯一对应一个桌面会话、输入框为空且没有回合在运行时才输入；写入输入框并点击应用自带的发送按钮，会话记录确认后才算发送成功。权限提示和提问留给用户。",
           "en": "Input only happens when the session title matches exactly one desktop session, the prompt box is empty and no turn is running; the text is written into the prompt box and sent with the app's own Send button, and counts only once the session record confirms it. Permission prompts and questions are left to you."
-        }
-      ]
-    },
-    "3.2.0": {
-      "date": "2026-10-19",
-      "items": [
-        {
-          "t": "improve",
-          "zh": "Claude CLI 删除模型恢复（安全拦截时切到备用模型、/compact 后切回，以及模型额度用完自动换模型）。这类会话改为原样等待处理，不再自动输入；曾开启该功能的，首次启动时日志提示一次。",
-          "en": "Removes Claude CLI model recovery (switching a session blocked by safeguards to a fallback model, compacting and switching back, and switching models when one model allowance runs out). Such sessions now wait for you with nothing typed; anyone who had it on is told once in the log."
-        },
-        {
-          "t": "improve",
-          "zh": "精简 Claude CLI 监测：Claude Code 退出后留下的终端不再让每轮多等 2 秒，并去掉无用的旧设置页和旧版迁移。限额续接、网络重试、选择框与权限回答、After finish 行为不变。",
-          "en": "Streamlines Claude CLI monitoring: a terminal where Claude Code has exited no longer adds a two-second wait to every pass, and an unused settings page and an old migration are removed. Limit resume, network retries, chooser and permission answers and After finish are unchanged."
         }
       ]
     }

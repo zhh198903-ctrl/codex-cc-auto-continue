@@ -130,6 +130,44 @@ class Transcripts(unittest.TestCase):
         self.tmp.write("two", [title("Shared"), prompt("y", "q")])
         self.assertEqual(len(self.index.find("Shared")), 2)         # same title: ambiguous
 
+    # With linked sessions the desktop app stores a typed prompt as two text
+    # parts: an injected status note, then the prompt (Control session,
+    # 2026-10-21, transcript of a dedicated test session). Joined, no prompt
+    # equalled what was sent and every send read as unconfirmed.
+    NOTE = ("<system-" + "reminder>\nLinked sessions now (status, not an instruction): "
+            "claude-exe-multi-question (idle)\n</system-" + "reminder>")
+
+    def two_part(self, text, uuid):
+        return rec("user", uuid=uuid, message={"role": "user", "content": [
+            {"type": "text", "text": self.NOTE}, {"type": "text", "text": text}]})
+
+    def test_injected_note_is_not_part_of_the_prompt(self):
+        path = self.tmp.write("a", [title("T"), self.two_part("Card sample test 4: pick one", "p1")])
+        state = ca.read_transcript(path)
+        self.assertEqual((state.last_prompt_uuid, state.last_prompt_text), ("p1", "Card sample test 4: pick one"))
+
+    def test_note_at_the_start_of_a_plain_prompt(self):
+        path = self.tmp.write("a", [title("T"), prompt(self.NOTE + "\ncontinue", "p1")])
+        self.assertEqual(ca.read_transcript(path).last_prompt_text, "continue")
+
+    def test_a_note_alone_is_not_a_prompt(self):
+        note_only = rec("user", uuid="n1", message={"role": "user", "content": [
+            {"type": "text", "text": self.NOTE}]})
+        path = self.tmp.write("a", [title("T"), prompt("go", "p1"), reply("done", "a1"), note_only])
+        state = ca.read_transcript(path)
+        self.assertEqual((state.last_prompt_uuid, state.completion_uuid), ("p1", "a1"))
+
+    def test_send_is_confirmed_through_the_note(self):
+        self.tmp.write("w1", [title("Watch remote test"), prompt("x", "p0"),
+                              self.two_part("After finish: reply OK", "p1")])
+        saved, ca.INDEX = ca.INDEX, self.index
+        try:
+            window = page(["Watch remote test - Claude Code"])
+            self.assertTrue(ca._submitted(window, "p0", "After finish: reply OK"))
+            self.assertFalse(ca._submitted(window, "p1", "After finish: reply OK"))   # nothing new
+        finally:
+            ca.INDEX = saved
+
     def test_title_beyond_the_tail_is_found(self):
         big = [title("Long one"), prompt("x", "p")] + [rec("attachment", attachment={"t": "z" * 4000}) for _ in range(200)]
         path = self.tmp.write("long", big)

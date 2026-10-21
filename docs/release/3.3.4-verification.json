@@ -1,0 +1,86 @@
+{
+  "version": "3.3.4",
+  "date": "2026-10-22",
+  "exe_sha256": "e705b191ebeefe8ac013bac577648f9a21dda3d685010236561eca0e998e9925",
+  "exe_bytes": 28038298,
+  "change": "Claude EXE transcript reading: leading <system-reminder> blocks (and text parts made only of one) are left out of a record's text; a user record holding only such a note is not a prompt",
+  "reported_by": "Codex Claude Control session (2026-10-21; sample record 22:05:16.547Z in test session 64ab933c)",
+  "real_record_check": {
+    "3.3.3_prompt_text_starts": "<system-reminder> Linked sessions now ...",
+    "3.3.4_prompt_text_starts": "Card sample test 4: ...",
+    "prompt_uuid_and_completion_unchanged": true
+  },
+  "source_checks": {
+    "legacy_suites": "all green",
+    "unittest": 185,
+    "pytest": 96,
+    "subtests": 19,
+    "new_cases": 4,
+    "new_cases_fail_on_3.3.3": 4
+  },
+  "packaged_selftest_passed": true,
+  "live": {
+    "source_send_prompt": {
+      "at": "2026-10-21T22:35:40Z",
+      "result": "sent/confirmed",
+      "record_parts": 2,
+      "first_part": "Linked sessions now note",
+      "3.3.3_would_match": false
+    },
+    "installed_exe_after_finish": {
+      "at": "2026-10-21T22:36:03Z",
+      "log": "Claude EXE #6070688: after-finish prompt; submission confirmed",
+      "record_parts": 2,
+      "answered": "NOTEOK2"
+    },
+    "excluded_sessions_received_nothing": [
+      "Control 更新集成与手表验证",
+      "Claude EXE: multi-question and multi-select cards on the watch"
+    ],
+    "other_auto_continue_instances": "none (coordinated with the Control and multi-question sessions)"
+  },
+  "installed_exe_verified": {
+    "path": "D:\\claude\\auto_continue\\dist\\Auto-Continue.exe",
+    "previous_backed_up_sha256": "01fed42c391f8301014e282c8cd351598f1acf4026d5f32dbcac276cbed50ee1",
+    "dry_run": {
+      "live": false,
+      "launch": "started pid=28124",
+      "title": "Auto-Continue v3.3.4 · Claude / Codex",
+      "rows": [
+        "[Claude EXE] Claude EXE 手表遥控测试会话",
+        "[Claude EXE] Claude EXE: multi-question and multi-select cards on the watch"
+      ],
+      "popout_row": true,
+      "poll_before_after": [
+        2.0,
+        3.0
+      ],
+      "saved_poll": 3,
+      "closed_1": true,
+      "log_1": [
+        "06:34:58 [info] Claude EXE watcher started"
+      ],
+      "poll_after_restart": 3.0,
+      "popout_row_after_restart": true,
+      "closed_2": true
+    },
+    "live": {
+      "live": true,
+      "launch": "started pid=32396",
+      "title": "Auto-Continue v3.3.4 · Claude / Codex",
+      "rows": [
+        "[Claude EXE] Claude EXE 手表遥控测试会话",
+        "[Claude EXE] Claude EXE: multi-question and multi-select cards on the watch"
+      ],
+      "popout_row": true,
+      "closed_1": true,
+      "log_1": [
+        "06:35:34 [info] Claude EXE watcher started",
+        "06:36:03 [fire] Claude EXE #6070688: after-finish prompt; submission confirmed"
+      ]
+    }
+  },
+  "user_codex_windows_operated": false,
+  "claude_login_or_underlying_changes": false,
+  "control_bundle_modified": false
+}

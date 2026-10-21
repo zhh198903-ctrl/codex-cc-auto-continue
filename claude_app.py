@@ -154,15 +154,39 @@ def _records_from_tail(path, max_bytes=TAIL_BYTES):
     return out
 
 
-def _text_of(record):
+# A status note the desktop app adds to a typed prompt. Once a session has
+# linked sessions, each prompt is stored with TWO text parts, this note
+# ("Linked sessions now (status, not an instruction): ...") and then what was
+# typed (Control session, 2026-10-21). Read as one text, no prompt ever equalled
+# what was sent, so every send was reported unconfirmed although it arrived.
+_REMINDER = re.compile(r"\A\s*<system-reminder>.*?</system-reminder>\s*", re.S)
+
+
+def _without_reminders(text):
+    """`text` without the system-reminder blocks it starts with."""
+    text = str(text or "")
+    while True:
+        m = _REMINDER.match(text)
+        if not m:
+            return text
+        text = text[m.end():]
+
+
+def _text_parts(record):
     msg = record.get("message")
     content = msg.get("content") if isinstance(msg, dict) else None
     if isinstance(content, str):
-        return content
+        return [content]
     if isinstance(content, list):
-        return "\n".join(str(part.get("text", "")) for part in content
-                         if isinstance(part, dict) and part.get("type") == "text")
-    return ""
+        return [str(part.get("text", "")) for part in content
+                if isinstance(part, dict) and part.get("type") == "text"]
+    return []
+
+
+def _text_of(record):
+    """The record's text, leaving out injected system-reminder notes."""
+    parts = (_without_reminders(p) for p in _text_parts(record))
+    return "\n".join(p for p in parts if p.strip())
 
 
 def _is_prompt(record):
@@ -171,12 +195,12 @@ def _is_prompt(record):
         return False
     msg = record.get("message")
     content = msg.get("content") if isinstance(msg, dict) else None
-    if isinstance(content, str):
-        return bool(content.strip())
-    if isinstance(content, list):
-        return any(isinstance(p, dict) and p.get("type") == "text" for p in content) and not any(
-            isinstance(p, dict) and p.get("type") == "tool_result" for p in content)
-    return False
+    if isinstance(content, list) and any(
+            isinstance(p, dict) and p.get("type") == "tool_result" for p in content):
+        return False
+    # A record that is nothing but an injected note is not something typed:
+    # counted as the latest prompt, it would hide the turn's own completion.
+    return bool(_text_of(record).strip())
 
 
 @dataclass

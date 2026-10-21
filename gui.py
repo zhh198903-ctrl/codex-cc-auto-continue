@@ -4487,6 +4487,13 @@ position. It only does so while the box is empty, no turn is running and the
 window still shows the same session. A send counts once the session's history
 records the new prompt; if the Send button cannot be found, the text it wrote
 is removed again rather than left behind as a draft.</p>
+<p><b>Linked sessions.</b> Once a session has linked sessions, the desktop app
+stores each prompt with a status note in front of it ("Linked sessions now
+&hellip;"). Before 3.3.4 that note was read as part of the prompt, so no
+prompt ever matched what was sent: every send was reported as unconfirmed
+although it had arrived. The note is now left out when the history is read,
+and a history entry holding nothing but such a note does not count as a
+prompt.</p>
 <p><b>Not done in this version.</b> Permission prompts and questions are left
 for you, and model and effort are not changed; the Model column shows the
 session's current model.</p>
