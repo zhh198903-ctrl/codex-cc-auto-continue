@@ -16,3 +16,5 @@ Completed checks:
 Not verified: the fixed reader against a live Claude Code suggestion (source or packaged). While unused, suggestions appear only every tenth eligible turn and only while the terminal has focus, and another program kept taking the foreground, so none appeared again after the fix. The live suggestion's colours and caret were measured before the fix; the fixed reader was checked on drawn terminal states with the same escape codes and caret placement.
 
 User Codex windows were not operated. No Claude login, underlying Claude change or Claude Code setting change was made.
+
+Public acceptance: GitHub release v3.3.2 is Latest, with the local EXE as its asset (same SHA-256); source checks passed on main and on the tag. The download site serves both 3.3.2 packages (size, SHA-256, ZIP CRC and HTTP 206 checked over the public link). Only the Auto-Continue card changed, and the server keeps 3.3.2, 3.3.1, 3.3.0, 3.2.0 and 3.1.2. The unmodified published 3.3.1 client updated on its first Update now: it chose the mirror, then verified, replaced and reopened as 3.3.2, with settings kept, monitors off and the previous EXE saved as `.bak`.
