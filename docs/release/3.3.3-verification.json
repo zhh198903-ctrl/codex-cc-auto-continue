@@ -75,5 +75,47 @@
   },
   "user_codex_windows_operated": false,
   "claude_login_or_underlying_changes": false,
-  "control_bundle_modified": false
+  "control_bundle_modified": false,
+  "github_release": {
+    "tag": "v3.3.3",
+    "target": "1d3a7301b2ddf1f85046fb42107ad2a6a7ccd6c0",
+    "latest": true,
+    "asset_sha256": "01fed42c391f8301014e282c8cd351598f1acf4026d5f32dbcac276cbed50ee1",
+    "ci_source_checks": "passed on main and v3.3.3"
+  },
+  "public_download_verification": {
+    "version": "3.3.3",
+    "github_release": "https://github.com/zhh198903-ctrl/codex-cc-auto-continue/releases/tag/v3.3.3",
+    "source_commit": "1d3a7301b2ddf1f85046fb42107ad2a6a7ccd6c0",
+    "exe_sha256": "01fed42c391f8301014e282c8cd351598f1acf4026d5f32dbcac276cbed50ee1",
+    "exe_bytes": 28037114,
+    "packages": {
+      "Auto-Continue_dist_v3_3_3.zip": {
+        "bytes": 27709170,
+        "sha256": "c41549407f234b7bda8175051a3c6d925e55b51a3983c88674846b3ca65e5943"
+      },
+      "Auto-Continue-Skill_dist_v3_3_3.zip": {
+        "bytes": 11051,
+        "sha256": "92fd47b23f9c4607a600d46c5bc7ef7c3e8f616daa12b4c1dba1491be17a9b8b"
+      }
+    },
+    "github_and_zip_exe_match_local": true,
+    "public_download_verified": true,
+    "http_range_verified": true,
+    "other_homepage_content_identical": true,
+    "server_versions_retained": [
+      "3.3.3",
+      "3.3.2",
+      "3.3.1",
+      "3.3.0",
+      "3.2.0"
+    ]
+  },
+  "public_legacy_client_upgrade": {
+    "original_version": "3.3.2",
+    "original_sha256": "f49279a24844dedc643e0b840f2c410637cf5434b8bc15df5194abc1b9fbb0c0",
+    "updated_version": "3.3.3",
+    "updated_sha256": "01fed42c391f8301014e282c8cd351598f1acf4026d5f32dbcac276cbed50ee1",
+    "result": "passed on the first Update now: mirror chosen, verified, replaced, restarted as 3.3.3; settings kept (Poll 33); monitors stayed off; previous EXE kept as .bak"
+  }
 }
